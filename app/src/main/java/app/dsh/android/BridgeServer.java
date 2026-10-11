@@ -295,7 +295,9 @@ final class BridgeServer {
                 String value = request.getString("text");
                 if (value.isEmpty() || value.length() > 4096 || value.indexOf('\0') >= 0)
                     throw new IllegalArgumentException("文字必须为 1 至 4096 个字符，不能包含 NUL");
-                if (displayId != 0 || !value.matches("[\\x20-\\x7E]*") || value.contains("%s") || value.length() > 128)
+                // InputManager routes these key events to the explicitly selected display.
+                // Do not require an IME connection for printable text on secondary screens.
+                if (!canInjectTextAsKeys(value))
                     return inputUnicode(value, displayId);
                 command = "input -d " + displayId + " text " + quote(value.replace(" ", "%s"));
                 break;
@@ -593,8 +595,15 @@ final class BridgeServer {
         }
     }
 
+    static boolean canInjectTextAsKeys(String text) {
+        return !text.isEmpty() && text.length() <= 4096 && text.matches("[\\x20-\\x7E]*") && !text.contains("%s");
+    }
+
     static boolean isInputTargetOnDisplay(String state, int uid, int pid, int displayId) {
-        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("mCurClient=ClientState\\{[^}]*mUid=(\\d+)\\s+mPid=(\\d+)\\s+mSelfReportedDisplayId=(\\d+)[^}]*\\}").matcher(state);
+        // Older releases/OEM builds omit the m prefix in ClientState fields.
+        // Only the current bound client is evidence; never use the registered-client list
+        // or the keyboard window's display (IME may be rendered on the main screen).
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?m)^\\s*mCurClient\\s*=\\s*ClientState\\{[^}]*\\b(?:mUid|uid)=(\\d+)\\s+(?:mPid|pid)=(\\d+)\\s+(?:mSelfReportedDisplayId|selfReportedDisplayId)=(\\d+)[^}]*\\}").matcher(state);
         boolean found = false;
         while (matcher.find()) {
             if (Integer.parseInt(matcher.group(1)) != uid || Integer.parseInt(matcher.group(2)) != pid

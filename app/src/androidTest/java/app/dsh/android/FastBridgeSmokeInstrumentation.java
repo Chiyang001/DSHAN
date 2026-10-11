@@ -25,6 +25,7 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
     private int peerLivePort;
     private int launchDisplay = -1;
     private int unicodeDisplay;
+    private int unicodeAdbPort;
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
@@ -39,6 +40,7 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
         if (arguments != null && arguments.containsKey("peerLivePort")) peerLivePort = Integer.parseInt(arguments.getString("peerLivePort"));
         if (arguments != null && arguments.containsKey("launchDisplay")) launchDisplay = Integer.parseInt(arguments.getString("launchDisplay"));
         if (arguments != null && arguments.containsKey("unicodeDisplay")) unicodeDisplay = Integer.parseInt(arguments.getString("unicodeDisplay"));
+        if (arguments != null && arguments.containsKey("unicodeAdbPort")) unicodeAdbPort = Integer.parseInt(arguments.getString("unicodeAdbPort"));
         start();
     }
 
@@ -438,6 +440,7 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
 
     private void verifyUnicodeInput(Bundle report) throws Exception {
         startActivitySync(new Intent(getTargetContext(), MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        if (unicodeAdbPort > 0) check(AdbClient.get(getTargetContext()).connect("127.0.0.1", unicodeAdbPort), "Local ADB connected for input test");
         Field bridgeField = MainActivity.class.getDeclaredField("bridge");
         bridgeField.setAccessible(true);
         dispatch = BridgeServer.class.getDeclaredMethod("dispatch", JSONObject.class);
@@ -458,6 +461,10 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
             check(activity.getDisplay().getDisplayId() == unicodeDisplay, "Editor stays on requested screen");
             check(BridgeServer.isInputTargetOnDisplay("mCurClient=ClientState{x mUid=123 mPid=456 mSelfReportedDisplayId=22}", 123, 456, 22), "Target parser accepts secondary editor");
             check(!BridgeServer.isInputTargetOnDisplay("mCurClient=ClientState{x mUid=123 mPid=456 mSelfReportedDisplayId=0}", 123, 456, 22), "Target parser rejects main-screen editor");
+            check(BridgeServer.isInputTargetOnDisplay("mCurClient=ClientState{x uid=123 pid=456 selfReportedDisplayId=22}\nmDisplayIdToShowIme=0", 123, 456, 22), "Legacy client fields and main-screen keyboard accepted");
+            check(!BridgeServer.isInputTargetOnDisplay("ClientState{x mUid=123 mPid=456 mSelfReportedDisplayId=22}:\nmCurClient=null", 123, 456, 22), "Registered clients alone do not establish focus");
+            check(BridgeServer.canInjectTextAsKeys("Love Story hello 123 ' \" ; $"), "Printable search text uses display key injection");
+            check(!BridgeServer.canInjectTextAsKeys("中文") && !BridgeServer.canInjectTextAsKeys("literal %s"), "Unrepresentable key text retains verified Unicode path");
             JSONObject receipt = call(new JSONObject().put("method", "text").put("text", expected).put("displayId", unicodeDisplay));
             check(receipt.getBoolean("ok") && receipt.getString("inputMethod").equals("unicode-ime"), "Unicode bridge receipt");
             check(previous.equals(android.provider.Settings.Secure.getString(getTargetContext().getContentResolver(), "default_input_method")), "Previous keyboard restored");
@@ -470,7 +477,24 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
                 catch (Exception error) { throw new RuntimeException(error); }
             });
             check(expected.equals(value.get()), "Unicode text round-trip");
-            report.putString("result", "UNICODE_INPUT_SMOKE_OK: Shizuku bridge, Chinese, mixed text, punctuation, percent-s, emoji, newline, keyboard restoration");
+            String printable = "Love Story hello 123 ' \" ; $ & (test) " + "long text ".repeat(20);
+            runOnMainSync(() -> { try { ((android.widget.EditText) field.get(activity)).setText(""); } catch (Exception error) { throw new RuntimeException(error); } });
+            JSONObject keyReceipt = call(new JSONObject().put("method", "text").put("text", printable).put("displayId", unicodeDisplay));
+            check(keyReceipt.getBoolean("ok") && !keyReceipt.has("inputMethod"), "Printable text does not use IME");
+            Thread.sleep(300);
+            runOnMainSync(() -> { try { value.set(((android.widget.EditText) field.get(activity)).getText().toString()); } catch (Exception error) { throw new RuntimeException(error); } });
+            check(printable.equals(value.get()), "Display key injection preserves spaces, punctuation and long text");
+            check(previous.equals(android.provider.Settings.Secure.getString(getTargetContext().getContentResolver(), "default_input_method")), "Display key injection leaves keyboard unchanged");
+            if (unicodeDisplay != 0) {
+                boolean rejected = false;
+                try { call(new JSONObject().put("method", "text").put("text", "不能误输到主屏").put("displayId", 0)); }
+                catch (Exception error) { rejected = error.getMessage() != null && error.getMessage().contains("INPUT_DISPLAY_MISMATCH"); }
+                check(rejected, "Unicode target mismatch rejected before text submission");
+                runOnMainSync(() -> { try { value.set(((android.widget.EditText) field.get(activity)).getText().toString()); } catch (Exception error) { throw new RuntimeException(error); } });
+                check(printable.equals(value.get()), "Rejected input leaves secondary editor unchanged");
+                check(previous.equals(android.provider.Settings.Secure.getString(getTargetContext().getContentResolver(), "default_input_method")), "Rejected input restores keyboard");
+            }
+            report.putString("result", "UNICODE_INPUT_SMOKE_OK: device bridge, display-scoped key text, Chinese, punctuation, percent-s, emoji, newline, target mismatch rejection, keyboard restoration");
             report.putInt("editorDisplay", unicodeDisplay);
         } finally {
             if (previous != null && previous.matches("[A-Za-z0-9_./]+")) shell("ime set " + previous);
