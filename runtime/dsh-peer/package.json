@@ -1,12 +1,23 @@
 {
   "name": "dsh-peer",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "main": "index.js",
-  "scripts": { "test": "node --test test/*.test.js", "signal": "node signal-server.js" },
-  "engines": { "node": ">=22" },
-  "dependencies": { "werift": "0.25.0", "ws": "8.22.0" },
-  "peerDependencies": { "@deepseek-ai/dsh-tools": "^0.1.7-rc.2 || ^0.2.0-rc.2" },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "signal": "node signal-server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4",
+    "werift": "0.25.0",
+    "ws": "8.22.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.7-rc.2 || ^0.2.0-rc.2"
+  },
   "author": "炽阳001",
   "homepage": "https://github.com/Chiyang001/DSHAN"
 }

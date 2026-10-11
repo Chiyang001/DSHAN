@@ -21,6 +21,7 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
     private boolean adbStreamCheck;
     private boolean captureOnly;
     private boolean shizukuLifecycleCheck;
+    private boolean peerQrCheck;
     private int peerLivePort;
     private int launchDisplay = -1;
     private int unicodeDisplay;
@@ -34,6 +35,7 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
         adbStreamCheck = arguments != null && "true".equals(arguments.getString("adbStreamCheck"));
         captureOnly = arguments != null && "true".equals(arguments.getString("captureOnly"));
         shizukuLifecycleCheck = arguments != null && "true".equals(arguments.getString("shizukuLifecycleCheck"));
+        peerQrCheck = arguments != null && "true".equals(arguments.getString("peerQrCheck"));
         if (arguments != null && arguments.containsKey("peerLivePort")) peerLivePort = Integer.parseInt(arguments.getString("peerLivePort"));
         if (arguments != null && arguments.containsKey("launchDisplay")) launchDisplay = Integer.parseInt(arguments.getString("launchDisplay"));
         if (arguments != null && arguments.containsKey("unicodeDisplay")) unicodeDisplay = Integer.parseInt(arguments.getString("unicodeDisplay"));
@@ -79,6 +81,43 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
         }
     }
 
+    private void verifyPeerQr(Bundle report) throws Exception {
+        java.io.File root = getTargetContext().getNoBackupFilesDir();
+        Bitmap bitmap = BitmapFactory.decodeFile(new java.io.File(root, "peer-settings-qr.png").getPath());
+        check(bitmap != null, "Desktop QR image decodes as PNG");
+        int[] pixels = new int[bitmap.getWidth() * bitmap.getHeight()];
+        bitmap.getPixels(pixels, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
+        String decoded = new com.google.zxing.MultiFormatReader().decode(new com.google.zxing.BinaryBitmap(
+            new com.google.zxing.common.HybridBinarizer(new com.google.zxing.RGBLuminanceSource(bitmap.getWidth(), bitmap.getHeight(), pixels)))).getText();
+        String expected = new String(java.nio.file.Files.readAllBytes(new java.io.File(root, "peer-settings-live-code").toPath()), java.nio.charset.StandardCharsets.UTF_8);
+        check(decoded.equals(expected), "Native scanner reads the exact desktop pairing code");
+        bitmap.recycle();
+        MainActivity activity = (MainActivity) startActivitySync(new Intent(getTargetContext(), MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        Field field = MainActivity.class.getDeclaredField("web"); field.setAccessible(true);
+        android.webkit.WebView web = (android.webkit.WebView) field.get(activity);
+        long deadline = System.currentTimeMillis() + 30000;
+        while (!"\"ready\"".equals(evaluate(web, "document.readyState === 'complete' && location.host === '127.0.0.1:3080' ? 'ready' : 'wait'"))) {
+            check(System.currentTimeMillis() < deadline, "Harness UI ready before scan result"); Thread.sleep(250);
+        }
+        evaluate(web, "window.addEventListener('dsh-peer-scan',function(e){window.__scanCheck=e.detail});'installed'");
+        Intent result = new Intent().putExtra("SCAN_RESULT", decoded).putExtra("SCAN_RESULT_FORMAT", "QR_CODE");
+        runOnMainSync(() -> activity.onActivityResult(com.google.zxing.integration.android.IntentIntegrator.REQUEST_CODE, android.app.Activity.RESULT_OK, result));
+        check("true".equals(evaluate(web, "window.__scanCheck.code === " + JSONObject.quote(decoded))), "Native result delivered to pairing UI");
+        runOnMainSync(() -> activity.onActivityResult(com.google.zxing.integration.android.IntentIntegrator.REQUEST_CODE, android.app.Activity.RESULT_OK, new Intent().putExtra("SCAN_RESULT", "https://example.com")));
+        check("true".equals(evaluate(web, "window.__scanCheck.code === null && !!window.__scanCheck.error")), "Unrelated QR rejected");
+        runOnMainSync(() -> activity.onActivityResult(com.google.zxing.integration.android.IntentIntegrator.REQUEST_CODE, android.app.Activity.RESULT_CANCELED, null));
+        check("true".equals(evaluate(web, "window.__scanCheck.code === null && window.__scanCheck.error === null")), "Scanner cancellation returns safely");
+        report.putString("result", "PEER_QR_SMOKE_OK");
+    }
+
+    private String evaluate(android.webkit.WebView web, String script) throws Exception {
+        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> result = new java.util.concurrent.atomic.AtomicReference<>();
+        runOnMainSync(() -> web.evaluateJavascript(script, value -> { result.set(value); done.countDown(); }));
+        check(done.await(10, java.util.concurrent.TimeUnit.SECONDS), "WebView scan callback completes");
+        return result.get();
+    }
+
     private JSONObject call(JSONObject request) throws Exception {
         try { return (JSONObject) dispatch.invoke(bridge, request); }
         catch (InvocationTargetException error) {
@@ -93,6 +132,11 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
     @Override public void onStart() {
         Bundle report = new Bundle();
         try {
+            if (peerQrCheck) {
+                verifyPeerQr(report);
+                finish(0, report);
+                return;
+            }
             if (peerLivePort > 0) {
                 startActivitySync(new Intent(getTargetContext(), MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                 AdbClient client = AdbClient.get(getTargetContext());

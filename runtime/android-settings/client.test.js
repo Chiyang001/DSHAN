@@ -59,13 +59,18 @@ function mountPlugin(overrides = {}) {
   return { slots }
 }
 
-test('the plugin registers only its two settings surfaces', () => {
+test('the plugin registers connection immediately after Android settings', () => {
   const { slots } = mountPlugin()
   const names = slots.map(({ options }) => `${options.name}#${options.id}`)
   assert.deepEqual(names, [
     'settings.action#android-kernel-update',
     'settings.section#android',
+    'settings.section#connection',
   ])
+  const android = slots.find(slot => slot.options.id === 'android')
+  const connection = slots.find(slot => slot.options.id === 'connection')
+  assert.equal(connection.options.order, android.options.order + 1)
+  assert.equal(connection.options.label(), '连接')
 })
 
 test('the plugin asks for no service beyond slots', () => {
@@ -98,7 +103,7 @@ test('the Android settings section still renders its controls', () => {
     return textKids.some((node) => node?.props?.className === 'Pt1bsG_title')
   })
   /* Shizuku, storage access, and the two Harness switches. */
-  assert.equal(settingRows.length, 10)
+  assert.equal(settingRows.length, 11)
   assert.match(source, /Pt1bsG_row/)
   assert.match(source, /@deepseek-ai\/dsh-client-ui-primitives/)
   assert.doesNotMatch(source, /type: 'checkbox'/)

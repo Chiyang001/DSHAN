@@ -970,6 +970,17 @@ public class MainActivity extends Activity {
         private final MainActivity activity;
         WebDownloadBridge(MainActivity activity) { this.activity = activity; }
         @JavascriptInterface
+        public void scanPeerQr() {
+            activity.runOnUiThread(() -> {
+                com.google.zxing.integration.android.IntentIntegrator scan = new com.google.zxing.integration.android.IntentIntegrator(activity);
+                scan.setDesiredBarcodeFormats(com.google.zxing.integration.android.IntentIntegrator.QR_CODE);
+                scan.setPrompt("扫描电脑 DeepSeek Harness 连接插件的配对二维码");
+                scan.setBeepEnabled(false);
+                scan.setOrientationLocked(true);
+                scan.initiateScan();
+            });
+        }
+        @JavascriptInterface
         public void startDownload(String url, String filename) {
             activity.runOnUiThread(() -> activity.enqueueBrowserDownload(url, filename));
         }
@@ -977,6 +988,18 @@ public class MainActivity extends Activity {
         public void debugLog(String json) {
             activity.debugLog("js", json, "webview");
         }
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        com.google.zxing.integration.android.IntentResult result = com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
+        if (result != null) {
+            String code = result.getContents();
+            String error = code != null && (!code.startsWith("dsh-peer:") || code.length() > 8192) ? "这不是 DSH 连接插件的配对二维码" : null;
+            String json = "{\"code\":" + (code == null || error != null ? "null" : org.json.JSONObject.quote(code)) + ",\"error\":" + (error == null ? "null" : org.json.JSONObject.quote(error)) + "}";
+            web.evaluateJavascript("window.dispatchEvent(new CustomEvent('dsh-peer-scan',{detail:" + json + "}))", null);
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
     }
 
     @Override public void onBackPressed() {

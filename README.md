@@ -31,7 +31,7 @@ DSHAN 是一个单 APK 原型：在 Android 应用进程内嵌 Node.js，启动�
 | 内核更新 | 在设置中下载并切换 DSH 内核，保留会话与设置 |
 | 手机与电脑互联 | 内置 DSH Peer 插件，经配对后双向调用已共享的 Harness 工具，支持配置跨网络 P2P/TURN |
 
-手机与电脑互联的安装、配对及公网服务部署见 [DSH Peer 使用说明](runtime/dsh-peer/README.md)。电脑端使用同一份插件；跨网络需要自行部署信令及 STUN/TURN 服务。
+手机与电脑互联的安装、配对及公网服务部署见 [DSH Peer 使用说明](runtime/dsh-peer/README.md)。手机在 **设置 → 连接**（Android 设置右侧）扫描电脑插件生成的二维码，或输入完整配对码，选择会话和允许共享的工具后连接。电脑端使用同一份插件；跨网络需自行部署配对服务，可通过 FRP 加密中继，STUN/TURN 用于提高直连可用性。
 
 > [!NOTE]
 > 本仓库仅提供源码，不提供 Release 或预构建 APK。自行构建支持 **Android 11 及以上 / arm64-v8a**。首次运行会解包官方 npm 包，请预留数百 MB 可用存储。

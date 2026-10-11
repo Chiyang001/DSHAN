@@ -8,6 +8,7 @@
     "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
     "@img/sharp-wasm32": "0.35.5",
     "npm": "11.6.2",
+    "qrcode": "1.5.4",
     "werift": "0.25.0",
     "ws": "8.22.0"
   }

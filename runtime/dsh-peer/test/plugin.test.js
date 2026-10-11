@@ -9,7 +9,7 @@ function harness(id) {
   const tools = new Map(), events = new Map(), pipeline = [], saved = [];
   let live = agent;
   const ctx = {
-    agents: { get: key => key === live?.id ? live : undefined, withInitiator: (_agent, action) => action() },
+    agents: { get: key => key === live?.id ? live : undefined, list: () => live ? [live] : [], withInitiator: (_agent, action) => action() },
     tools: {
       register: tool => tools.set(tool.name, tool),
       schemas: () => ['screen', 'denied', 'hidden', 'run_code'].map(name => ({ name, description: name, parameters: { type: 'object', properties: {} } })),
@@ -25,10 +25,16 @@ function harness(id) {
       saveImage: async input => { saved.push(input); return { attachmentId: id + '-new', mediaType: input.mediaType, bytes: input.data.length, width: 1, height: 1 }; },
     } : undefined,
     on: (name, action) => events.set(name, action),
+    inject: (_names, setup) => setup({ effect: fn => fn(), webServer: { register: route => { ctx.route = route; return () => {}; } }, connection: { authorizeIndex: (req, res) => { if (!req.authorized) { res.writeHead(401); res.end('{}'); } return req.authorized; } } }),
   };
   apply(ctx);
   const call = (name, args = {}, caller = agent) => tools.get(name).execute(args, { agent: caller, signal: new AbortController().signal });
-  return { agent, other, tools, events, pipeline, saved, call, disposeAgent: async () => { live = undefined; await events.get('agent/disposed')({ agent }); } };
+  const request = async (method = 'GET', input = {}, origin = 'http://localhost:3080', authorized = true) => {
+    const res = { status: 200, setHeader() {}, writeHead(status) { this.status = status; }, end(body) { this.body = body; } };
+    await ctx.route.handler({ method, authorized, headers: { host: 'localhost:3080', origin }, async *[Symbol.asyncIterator]() { yield JSON.stringify(input); } }, res);
+    return res;
+  };
+  return { agent, other, tools, events, pipeline, saved, call, request, disposeAgent: async () => { live = undefined; await events.get('agent/disposed')({ agent }); } };
 }
 test('plugin binds sharing to a live session, enforces allowlist and executes through local permission pipeline', { timeout: 30000 }, async t => {
   const server = createSignalServer({ port: 0 }); await once(server.http, 'listening');
@@ -38,7 +44,9 @@ test('plugin binds sharing to a live session, enforces allowlist and executes th
   await assert.rejects(phone.call('peer_host', { server: url, tools: 'run_code' }), /individual tools/);
   await assert.rejects(phone.call('peer_host', { server: url, tools: 'hidden' }), /unavailable/);
   const output = await phone.call('peer_host', { server: url, tools: 'screen,denied' });
-  const code = output.match(/dsh-peer:[A-Za-z0-9_-]+/)[0];
+  const code = output.content[0].text.match(/dsh-peer:[A-Za-z0-9_-]+/)[0];
+  assert.equal(output.content[1].type, 'image');
+  assert.equal(phone.saved[0].data.subarray(1, 4).toString(), 'PNG');
   await desktop.call('peer_join', { code, tools: '' });
   for (let i = 0; i < 100; i++) {
     if (JSON.parse(await desktop.call('peer_status')).state === 'connected') break;
@@ -57,4 +65,27 @@ test('plugin binds sharing to a live session, enforces allowlist and executes th
   assert.equal(denied.isError, true); assert.match(denied.content[0].text, /permission denied/);
   await phone.disposeAgent();
   assert.equal(JSON.parse(await phone.call('peer_status')).state, 'disconnected');
+});
+
+test('settings pairing authenticates writes and preserves session allowlist and revocation', { timeout: 30000 }, async t => {
+  const server = createSignalServer({ port: 0 }); await once(server.http, 'listening');
+  const phone = harness('phone-ui'), desktop = harness('desktop-ui');
+  t.after(async () => { await phone.call('peer_disconnect'); await desktop.call('peer_disconnect'); await server.close(); });
+  assert.equal((await phone.request('GET', {}, undefined, false)).status, 401);
+  assert.equal((await phone.request('POST', { action: 'disconnect' }, 'https://other.example')).status, 403);
+  const snapshot = JSON.parse((await phone.request()).body);
+  assert.deepEqual(snapshot.sessions[0].tools.map(tool => tool.name), ['screen', 'denied']);
+  const hosted = await desktop.call('peer_host', { server: `ws://127.0.0.1:${server.http.address().port}`, tools: 'screen', connection_mode: 'relay' });
+  const code = hosted.content[0].text.match(/dsh-peer:[A-Za-z0-9_-]+/)[0];
+  assert.equal((await phone.request('POST', { action: 'join', code, tools: '', sessionId: 'missing' })).status, 400);
+  assert.equal((await phone.request('POST', { action: 'join', code: 'bad', tools: '', sessionId: phone.agent.id })).status, 400);
+  assert.equal((await phone.request('POST', { action: 'join', code, tools: 'screen', sessionId: phone.agent.id })).status, 200);
+  for (let i = 0; i < 100 && JSON.parse((await phone.request()).body).state !== 'connected'; i++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(JSON.parse((await phone.request()).body).state, 'connected');
+  assert.deepEqual(JSON.parse(await desktop.call('peer_tools')).map(tool => tool.name), ['screen']);
+  await desktop.call('peer_call', { name: 'screen', arguments_json: '{}' });
+  assert.equal(phone.pipeline[0].agent, phone.agent);
+  await assert.rejects(desktop.call('peer_call', { name: 'denied', arguments_json: '{}' }), /not shared/);
+  assert.equal((await phone.request('POST', { action: 'disconnect' })).status, 200);
+  assert.equal(JSON.parse((await phone.request()).body).sessionId, null);
 });

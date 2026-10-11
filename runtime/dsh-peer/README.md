@@ -1,4 +1,4 @@
-# DSH Peer 0.1.2
+# DSH Peer 0.1.3
 
 DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN 和电脑 DSH 使用同一份 JavaScript 插件，优先通过 WebRTC 直连；连接未成功时，通过配对服务加密中继，调用对方明确共享的工具。没有额外安装桌面 ADB 的要求；手机操作仍走 DSHAN 本机的 ADB/Shizuku 桥接。
 
@@ -20,6 +20,8 @@ DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN �
 使用 Harness 的 **native 或 both 工具模式**。纯 PTC 模式不允许本插件直接调用工具；插件也不会共享 `run_code` 来绕过工具白名单。电脑可以在独立的共享会话/预设中启用需要的工具。
 
 ## 配对与使用
+
+手机可以直接在 **设置 → 连接**（Android 设置右侧）配对。电脑调用 `peer_host` 后会显示二维码和完整配对码；手机点击“扫码配对”扫描，或粘贴配对码，选择已打开的会话以及允许电脑调用的手机工具，再点击“配对并连接”。首次扫描需允许相机权限。扫描只填入配对码，不会自动授权工具。若使用自行配置的 HTTP FRP 地址，需开启“允许 HTTP 配对服务”。连接成功后可查看连接方式和共享工具，点击“断开连接”撤销共享。
 
 1. 两端各打开一个会话。手机选择 Android 模式，启用本机设备连接和控制权限。
 2. 在任一端要求创建配对，例如：“通过 `wss://pair.example.com` 创建配对，只共享 android_status、android_screenshot、android_tap、android_swipe、android_text、android_key。”会调用 `peer_host`，返回 `dsh-peer:` 开头的完整配对码。两分钟内复制给另一端。

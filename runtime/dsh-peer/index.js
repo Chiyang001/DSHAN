@@ -4,6 +4,7 @@ import { Peer } from './peer.js';
 import { createPair, encodePair, decodePair } from './protocol.js';
 import { androidHostAddresses } from './network.js';
 import { isIP } from 'node:net';
+import QRCode from 'qrcode';
 
 export const name = 'dsh-peer';
 export const inject = ['tools', 'agents'];
@@ -69,6 +70,36 @@ export function apply(ctx, config = {}) {
     await stop(); bindOwner(exec, tools);
     peer = new Peer({ pair, role, iceServers, hostAddresses, relayOnly: config.relayOnly === true, dispatch });
   };
+  const status = () => ({ ...(peer?.status() ?? { state: 'disconnected' }), sharedTools: [...allowed], sessionId: owner?.id ?? null });
+  // The settings UI uses the same session ownership, allowlist and tool guards as model calls.
+  ctx.inject(['webServer', 'connection'], scope => {
+    scope.effect(() => scope.webServer.register({ kind: 'exact', path: '/peer/settings', async handler(req, res) {
+      if (!scope.connection.authorizeIndex(req, res)) return;
+      res.setHeader('cache-control', 'no-store');
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      try {
+        if (req.method === 'POST') {
+          if (req.headers.origin !== `http://${req.headers.host}`) { res.writeHead(403); res.end(JSON.stringify({ error: '请求来源无效' })); return; }
+          let body = '';
+          for await (const chunk of req) { body += chunk; if (body.length > 16384) throw new Error('请求内容过长'); }
+          const input = JSON.parse(body);
+          if (input.action === 'disconnect') await stop();
+          else if (input.action === 'join') {
+            const agent = ctx.agents.get(input.sessionId);
+            if (!agent) throw new Error('请先打开一个会话，再选择该会话连接电脑');
+            if (typeof input.code !== 'string' || typeof input.tools !== 'string') throw new Error('配对信息无效');
+            await connect(decodePair(input.code.trim(), input.allowHttp === true), 'guest', { agent, signal: AbortSignal.timeout(15000) }, input.tools);
+          } else throw new Error('未知连接操作');
+        } else if (req.method !== 'GET') { res.writeHead(405); res.end('{}'); return; }
+        const sessions = ctx.agents.list().map((agent, index) => ({
+          id: agent.id,
+          label: agent.session?.deriveMessages?.().find(message => message.role === 'user')?.content?.find(block => block.type === 'text')?.text?.slice(0, 60) || `会话 ${index + 1}`,
+          tools: ctx.tools.schemas(agent).filter(tool => !tool.name.startsWith('peer_') && tool.name !== 'run_code' && ctx.tools.resolveExecution(tool.name, agent, false)).map(tool => ({ name: tool.name, description: tool.description })),
+        }));
+        res.end(JSON.stringify({ ...status(), sessions }));
+      } catch (error) { res.writeHead(400); res.end(JSON.stringify({ error: error.message })); }
+    } }), 'Peer connection settings');
+  });
   register('peer_host', 'Create a one-use P2P pairing code and share only the named local tools. Only run after the user requests pairing. Keep the code private; it grants remote access.', {
     server: string('Signaling server wss:// URL (ws:// loopback allowed for tests)'), tools: string('Comma-separated local tool names to share; empty string disables incoming calls'),
     ice_servers_json: { type: 'string', description: 'Optional JSON array of STUN/TURN servers with urls, username and credential; otherwise uses plugin configuration' },
@@ -82,8 +113,12 @@ export function apply(ctx, config = {}) {
     if (pair.signalingAddress !== undefined && !isIP(pair.signalingAddress)) throw new Error('Invalid signaling address');
     if (!['auto', 'relay', 'p2p'].includes(pair.mode)) throw new Error('Invalid connection mode');
     await connect(pair, 'host', exec, args.tools, args.ice_servers_json);
-    return 'Pairing code (expires in 2 minutes): ' + encodePair(pair) + '\nShared tools: ' + [...allowed].join(', ');
-  });
+    const code = encodePair(pair);
+    const content = [{ type: 'text', text: 'Pairing code (expires in 2 minutes): ' + code + '\nOn DSHAN open Settings → 连接, scan this QR or paste the code.\nShared tools: ' + [...allowed].join(', ') }];
+    const store = ctx.get('attachments');
+    if (store) content.push({ type: 'image', attachment: await store.saveImage({ data: await QRCode.toBuffer(code, { width: 640, margin: 4, errorCorrectionLevel: 'M' }), mediaType: 'image/png', name: 'DSH-pairing-QR.png' }) });
+    return { content };
+  }, { schema: { type: 'object', additionalProperties: true }, render: (_args, result) => result.content });
   register('peer_join', 'Join another Harness using its private pairing code. Share only the specified local tools. Only run after the user requests pairing.', {
     code: string('Complete dsh-peer: pairing code'), tools: string('Comma-separated local tool names to share; empty string disables incoming calls'),
     ice_servers_json: { type: 'string', description: 'Optional JSON array of STUN/TURN servers; configure on both ends for cross-network access' },
@@ -92,7 +127,7 @@ export function apply(ctx, config = {}) {
     await connect(decodePair(args.code.trim(), args.allow_http_signaling === true), 'guest', exec, args.tools, args.ice_servers_json);
     return 'Connecting. Use peer_status before calling remote tools.';
   });
-  register('peer_status', 'Show P2P connection status and tools shared by this device.', {}, async () => JSON.stringify({ ...(peer?.status() ?? { state: 'disconnected' }), sharedTools: [...allowed], sessionId: owner?.id ?? null }));
+  register('peer_status', 'Show P2P connection status and tools shared by this device.', {}, async () => JSON.stringify(status()));
   register('peer_disconnect', 'Disconnect and revoke remote access to all local tools.', {}, async () => { await stop(); return 'Disconnected; sharing revoked.'; });
   const requirePeer = exec => {
     if (!peer || peer.state !== 'connected') throw new Error('Peer is not connected');
