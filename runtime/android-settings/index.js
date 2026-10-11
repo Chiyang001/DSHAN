@@ -47,7 +47,7 @@ export function apply(ctx) {
             if (body.length > 2048) throw new Error('请求内容过长')
           }
           const input = JSON.parse(body)
-          if (!['updateAndroidSettings', 'requestShizuku', 'requestRoot', 'openStorageSettings', 'openOverlaySettings', 'createVirtualDisplay', 'closeVirtualDisplay', 'openDisplaySettings'].includes(input.method)) throw new Error('未知设置操作')
+          if (!['updateAndroidSettings', 'requestShizuku', 'requestAdbPairing', 'requestRoot', 'openStorageSettings', 'openOverlaySettings', 'createVirtualDisplay', 'closeVirtualDisplay', 'openDisplaySettings'].includes(input.method)) throw new Error('未知设置操作')
           request = { method: input.method }
           for (const key of ['controlEnabled', 'shellEnabled', 'rootEnabled', 'virtualDisplayAllowed']) {
             if (input[key] !== undefined) {

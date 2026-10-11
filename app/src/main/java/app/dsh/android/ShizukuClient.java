@@ -22,42 +22,66 @@ final class ShizukuClient {
     private volatile boolean binding;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Shizuku.UserServiceArgs serviceArgs;
+    private ServiceConnection connection;
     private final Runnable bindTimeout = this::onBindTimeout;
+    private int bindAttempt;
     private void onBindTimeout() {
         synchronized (this) {
             if (!binding || isReady()) return;
-            binding = false;
-            try { Shizuku.unbindUserService(serviceArgs, connection, false); }
+            ServiceConnection stale = connection;
+            connection = null;
+            try { Shizuku.unbindUserService(serviceArgs, stale, true); }
             catch (RuntimeException ignored) {}
+            boolean authorized;
+            try { authorized = hasPermission(); } catch (RuntimeException error) { authorized = false; }
+            if (bindAttempt++ == 0 && authorized) {
+                update("Shizuku 已授权，正在重新启动设备服务…");
+                main.postDelayed(this::startBindAttempt, 300);
+                return;
+            }
+            binding = false;
             connected.countDown();
-            update("Shizuku 服务连接超时，请点击授权按钮重试");
+            update("Shizuku 已授权，但设备服务启动失败。请允许 DSHAN 和 Shizuku 后台运行，再点击授权重试");
         }
     }
     private volatile NodeRuntime.Status status;
     private volatile String statusMessage = "Shizuku 尚未连接";
 
-    private final ServiceConnection connection = new ServiceConnection() {
+    private ServiceConnection newConnection() { return new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            if (connection != this || !binding) return;
             main.removeCallbacks(bindTimeout);
+            if (binder == null || !binder.isBinderAlive()) { onBindTimeout(); return; }
+            try { RemoteShellService.verifyOn(binder); }
+            catch (Exception error) {
+                android.util.Log.w("DSHAndroid", "Shizuku device service verification failed", error);
+                onBindTimeout();
+                return;
+            }
             binding = false;
             shell = binder;
             connected.countDown();
             update("Shizuku 已连接；可授权 Harness 操作");
         }
         @Override public void onServiceDisconnected(ComponentName name) {
+            if (connection != this) return;
             main.removeCallbacks(bindTimeout);
             shell = null;
             binding = false;
-            connected = new CountDownLatch(1);
+            connected.countDown();
             update("Shizuku 连接中断，请重新授权");
         }
-    };
+    }; }
 
     ShizukuClient(Context context) {
         this.context = context.getApplicationContext();
+        int serviceVersion = 3;
+        try { serviceVersion = Long.hashCode(this.context.getPackageManager()
+            .getPackageInfo(this.context.getPackageName(), 0).lastUpdateTime); }
+        catch (PackageManager.NameNotFoundException ignored) { }
         serviceArgs = new Shizuku.UserServiceArgs(
             new ComponentName(this.context, RemoteShellService.class))
-            .processNameSuffix("dsh-shell").tag("dsh-shell").version(2);
+            .processNameSuffix("dsh-shell").tag("dsh-shell").version(serviceVersion);
         Shizuku.addBinderReceivedListenerSticky(() -> {
             if (hasPermission()) bind();
             else update("Shizuku 已启动；点击按钮授权");
@@ -66,7 +90,8 @@ final class ShizukuClient {
             main.removeCallbacks(bindTimeout);
             shell = null;
             binding = false;
-            connected = new CountDownLatch(1);
+            connection = null;
+            connected.countDown();
             update("Shizuku 服务已停止");
         });
         Shizuku.addRequestPermissionResultListener((code, result) -> {
@@ -119,6 +144,13 @@ final class ShizukuClient {
         if (binding) return;
         binding = true;
         connected = new CountDownLatch(1);
+        bindAttempt = 0;
+        main.post(this::startBindAttempt);
+    }
+
+    private synchronized void startBindAttempt() {
+        if (!binding) return;
+        connection = newConnection();
         try {
             update("正在连接 Shizuku…");
             main.postDelayed(bindTimeout, 10000);
@@ -126,6 +158,7 @@ final class ShizukuClient {
         } catch (RuntimeException error) {
             main.removeCallbacks(bindTimeout);
             binding = false;
+            connected.countDown();
             update("Shizuku 连接失败：" + error.getMessage());
         }
     }
@@ -134,7 +167,7 @@ final class ShizukuClient {
         if (!isReady()) {
             if (!hasPermission()) throw new IllegalStateException("Shizuku 尚未授权");
             bind();
-            if (!connected.await(10, TimeUnit.SECONDS) || !isReady())
+            if (!connected.await(23, TimeUnit.SECONDS) || !isReady())
                 throw new IllegalStateException("Shizuku 服务连接超时");
         }
         try (InputStream in = new ParcelFileDescriptor.AutoCloseInputStream(

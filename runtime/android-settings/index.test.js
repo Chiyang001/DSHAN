@@ -48,5 +48,9 @@ test('Android settings requires authentication, same-origin writes and valid swi
     assert.deepEqual(calls[4], { method: 'createVirtualDisplay' })
     assert.equal((await request('POST', { method: 'closeVirtualDisplay' })).status, 200)
     assert.deepEqual(calls[5], { method: 'closeVirtualDisplay' })
+    assert.equal((await request('POST', { method: 'requestAdbPairing' }, 'https://example.com')).status, 403)
+    assert.equal(calls.length, 6)
+    assert.equal((await request('POST', { method: 'requestAdbPairing', code: '123456' })).status, 200)
+    assert.deepEqual(calls[6], { method: 'requestAdbPairing' })
   } finally { globalThis.fetch = originalFetch }
 })

@@ -156,6 +156,12 @@ window.__ModuleLoader__.load({
           () => action('requestShizuku'),
         ),
         actionRow(
+          '无线 ADB 配对',
+          (state?.adbStatus || '尚未连接') + '。无需 Shizuku：打开无线调试的配对码窗口，保持窗口打开，在 DSHAN 通知中输入六位配对码。',
+          state?.adbConnected ? '重新配对' : '通知栏配对',
+          () => action('requestAdbPairing'),
+        ),
+        actionRow(
           'Root 授权',
           state?.rootStatus || '已 Root 的手机可点击检测，并在 Root 管理器中授予权限。',
           '检测并授权 Root',

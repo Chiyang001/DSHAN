@@ -71,7 +71,9 @@ public class MainActivity extends Activity {
 
     private int wizardStep;
     private volatile boolean setupComplete;
-    private boolean webReady;
+    private volatile boolean webReady;
+    private boolean harnessPageLoading;
+    private int pageGeneration;
     private volatile String pendingLaunchUrl;
     private volatile String harnessAuthCookie;
     private int webAuthRetries;
@@ -91,7 +93,7 @@ public class MainActivity extends Activity {
         });
         worker.execute(() -> {
             try {
-                if (adb == null) adb = new AdbClient(this);
+                if (adb == null) adb = AdbClient.get(this);
                 if (bridge == null) {
                     byte[] random = new byte[32];
                     new SecureRandom().nextBytes(random);
@@ -115,6 +117,43 @@ public class MainActivity extends Activity {
         pollWeb();
         if (!setupComplete) showWizard(false);
         else showSplash(false);
+        if (getIntent().getBooleanExtra("adbPair", false)) requestAdbPairing();
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent.getBooleanExtra("adbPair", false)) requestAdbPairing();
+    }
+
+    private void requestAdbPairing() {
+        getIntent().removeExtra("adbPair");
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 73);
+            return;
+        }
+        android.app.NotificationManager manager = getSystemService(android.app.NotificationManager.class);
+        android.app.NotificationChannel channel = manager.getNotificationChannel(AdbPairingService.CHANNEL);
+        if (!manager.areNotificationsEnabled() || (channel != null && channel.getImportance() == 0)) {
+            android.widget.Toast.makeText(this, "请先允许 ADB 配对通知，再重新点击配对", android.widget.Toast.LENGTH_LONG).show();
+            Intent settings = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+            startActivity(settings);
+            return;
+        }
+        startForegroundService(new Intent(this, AdbPairingService.class).setAction(AdbPairingService.START));
+        try { startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)); }
+        catch (android.content.ActivityNotFoundException error) {
+            android.widget.Toast.makeText(this, "请在系统设置中打开开发者选项 → 无线调试", android.widget.Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == 73) {
+            if (results.length > 0 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) requestAdbPairing();
+            else android.widget.Toast.makeText(this, "通知栏配对需要通知权限，请允许后重试", android.widget.Toast.LENGTH_LONG).show();
+        }
     }
 
     private void buildUi() {
@@ -141,8 +180,18 @@ public class MainActivity extends Activity {
             enqueueBrowserDownload(url, URLUtil.guessFileName(url, contentDisposition, mimeType));
         });
         web.setWebViewClient(new WebViewClient() {
+            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                pageGeneration++;
+            }
             @Override public void onPageFinished(WebView view, String url) {
                 if (url.startsWith("http://127.0.0.1:3080/")) verifyKernelUi(0);
+            }
+            @Override public void onReceivedError(WebView view, android.webkit.WebResourceRequest request,
+                    android.webkit.WebResourceError error) {
+                if (!request.isForMainFrame()) return;
+                harnessPageLoading = false;
+                pageGeneration++;
+                setSplashStatus("Harness 页面加载失败，正在重试：" + error.getDescription());
             }
             @Override public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest request) {
                 String url = request.getUrl().toString();
@@ -381,7 +430,7 @@ public class MainActivity extends Activity {
         if (shizuku != null) shizuku.refresh();
         HarnessMonitorService.visibility(false);
         if (wizardOverlay != null && wizardOverlay.getVisibility() == View.VISIBLE
-                && (wizardStep == 2 || wizardStep == 3 || wizardStep == 4)) {
+                && (wizardStep == 2 || wizardStep == 3)) {
             applyWizardStepContent(wizardStep);
         }
     }
@@ -397,7 +446,7 @@ public class MainActivity extends Activity {
 
     private void goWizardStep(int step, boolean instant) {
         int previous = wizardStep;
-        wizardStep = Math.max(0, Math.min(5, step));
+        wizardStep = Math.max(0, Math.min(4, step));
         boolean forward = wizardStep >= previous;
         Runnable apply = () -> applyWizardStepContent(wizardStep);
         if (instant || previous == wizardStep) {
@@ -420,7 +469,7 @@ public class MainActivity extends Activity {
                 break;
             case 1:
                 wizardTitle.setText("连接设备权限");
-                wizardSubtitle.setText("选择 Shizuku 授权，或在已 Root 的手机上开启 Root 模式");
+                wizardSubtitle.setText("选择 Shizuku、无线 ADB 配对或 Root 连接");
                 bodyText(wizardBody, "Shizuku 会在系统层提供 shell 权限，无需手动配对无线调试。");
                 bodyText(wizardBody, "也可以跳过，稍后在设置中授权；未连接时仍可使用对话功能。");
                 Button auth = new Button(this);
@@ -435,8 +484,14 @@ public class MainActivity extends Activity {
                     try { shizuku.request(); }
                     catch (Exception error) { setWizardStatus("Shizuku 授权失败：" + error.getMessage()); }
                 });
+                Button pairAdb = new Button(this);
+                UiKit.styleSecondaryButtonOnLight(pairAdb, this);
+                pairAdb.setText("通过通知栏输入 ADB 配对码");
+                wizardBody.addView(pairAdb, fullButton());
+                pairAdb.setOnClickListener(v -> requestAdbPairing());
+                bodyText(wizardBody, "开启无线调试后选择“使用配对码配对设备”，保持窗口打开，在通知栏输入六位配对码，无需 Shizuku。");
                 shizuku.refresh();
-                wizardStatus.setText(shizuku.statusMessage());
+                wizardStatus.setText(adb != null && adb.isConnected() ? "无线 ADB 已连接" : shizuku.statusMessage());
                 bodyText(wizardBody, "已 Root 的手机也可以使用 Root 模式。开启后设备命令通过 su 执行，仍需下一步的设备控制授权。");
                 Button rootAuth = new Button(this);
                 UiKit.styleSecondaryButtonOnLight(rootAuth, this);
@@ -467,7 +522,7 @@ public class MainActivity extends Activity {
                     }
                     bridge.rootEnabled = enabled;
                     getSharedPreferences(PREFS, 0).edit().putBoolean("root", enabled).apply();
-                    wizardPrimary.setText(enabled || shizuku.isReady() ? "下一步" : "暂时跳过");
+                    refreshWizardButtons();
                 });
                 break;
             case 2:
@@ -520,37 +575,6 @@ public class MainActivity extends Activity {
                 wizardStatus.setText(overlayGranted ? "已开启：后台执行任务时会自动显示" : "尚未开启，可暂时跳过");
                 break;
             case 4:
-                wizardTitle.setText("虚拟副屏（可选）");
-                wizardSubtitle.setText("让 DeepSeek 在模拟辅助显示设备中操作，也可以跳过");
-                bodyText(wizardBody, "创建独立的 720×1280 副屏。需要 Shizuku 或 Root 授权；副屏截图和操作建议连接 Shizuku，截图需要 Android 14 及以上。");
-                bodyText(wizardBody, "创建后允许 DeepSeek 按需管理副屏。AI 会先查询实际显示 ID，再选择副屏操作；部分应用不支持副屏。");
-                Button virtualScreen = new Button(this);
-                UiKit.styleSecondaryButtonOnLight(virtualScreen, this);
-                virtualScreen.setText("创建虚拟副屏");
-                wizardBody.addView(virtualScreen, fullButton());
-                virtualScreen.setOnClickListener(v -> {
-                    virtualScreen.setEnabled(false);
-                    setVirtualDisplayStatus("正在创建虚拟副屏…");
-                    worker.execute(() -> {
-                        try {
-                            if (bridge == null) throw new IllegalStateException("应用正在初始化，请稍后重试");
-                            bridge.configureVirtualDisplay(true);
-                            setVirtualDisplayStatus("副屏已创建，可继续下一步；稍后可在 Android 设置中关闭");
-                        } catch (Exception error) { setVirtualDisplayStatus(error.getMessage()); }
-                        finally { ui.post(() -> virtualScreen.setEnabled(true)); }
-                    });
-                });
-                Button displaySettings = new Button(this);
-                UiKit.styleSecondaryButtonOnLight(displaySettings, this);
-                displaySettings.setText("在开发者选项中手动设置");
-                wizardBody.addView(displaySettings, fullButton());
-                displaySettings.setOnClickListener(v -> {
-                    try { startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)); }
-                    catch (android.content.ActivityNotFoundException error) { setVirtualDisplayStatus("系统未提供开发者选项入口，请在系统设置中开启开发者选项"); }
-                });
-                wizardStatus.setText("可选步骤，不设置也能继续使用主屏和对话功能");
-                break;
-            case 5:
                 wizardTitle.setText("一切就绪");
                 wizardSubtitle.setText("配置 DeepSeek API Key 后即可开始对话");
                 bodyText(wizardBody, webReady
@@ -588,7 +612,6 @@ public class MainActivity extends Activity {
             return;
         }
         if (wizardStep == 3) { goWizardStep(4); return; }
-        if (wizardStep == 4) { goWizardStep(5); return; }
         finishSetup();
     }
 
@@ -608,7 +631,7 @@ public class MainActivity extends Activity {
         switch (wizardStep) {
             case 0: wizardPrimary.setText("开始配置"); wizardPrimary.setEnabled(true); break;
             case 1:
-                wizardPrimary.setText(shizuku.isReady() || (bridge != null && bridge.rootEnabled && bridge.root.isReady()) ? "下一步" : "暂时跳过");
+                wizardPrimary.setText((adb != null && adb.isConnected()) || shizuku.isReady() || (bridge != null && bridge.rootEnabled && bridge.root.isReady()) ? "下一步" : "暂时跳过");
                 wizardPrimary.setEnabled(true);
                 break;
             case 2: wizardPrimary.setText("下一步"); wizardPrimary.setEnabled(true); break;
@@ -616,14 +639,13 @@ public class MainActivity extends Activity {
                 wizardPrimary.setText(Settings.canDrawOverlays(this) ? "下一步" : "暂时跳过");
                 wizardPrimary.setEnabled(true);
                 break;
-            case 4: wizardPrimary.setText("继续 / 跳过"); wizardPrimary.setEnabled(true); break;
-            case 5: wizardPrimary.setText("完成"); wizardPrimary.setEnabled(true); break;
+            case 4: wizardPrimary.setText("完成"); wizardPrimary.setEnabled(true); break;
         }
     }
 
     private void rebuildStepDots() {
         stepDots.removeAllViews();
-        String[] steps = {"欢迎", "连接设备", "操作权限", "后台悬浮窗", "虚拟副屏", "完成配置"};
+        String[] steps = {"欢迎", "连接设备", "操作权限", "后台悬浮窗", "完成配置"};
         wizardProgress.setText("第" + (wizardStep + 1) + "/" + steps.length + "步 · " + steps[wizardStep]);
         for (int i = 0; i < steps.length; i++) {
             View dot = new View(this);
@@ -749,7 +771,12 @@ public class MainActivity extends Activity {
                 if (code >= 200 && code < 500) {
                     pendingLaunchUrl = launchUrl;
                     ui.post(() -> {
-                        if (!webReady) loadHarnessLaunchUrl(launchUrl);
+                        // A slow WebView must be allowed to finish loading its JS bundle.
+                        // Reloading the token URL on every poll aborts that initialization.
+                        if (!webReady && !harnessPageLoading) {
+                            harnessPageLoading = true;
+                            loadHarnessLaunchUrl(launchUrl);
+                        }
                     });
                 }
             } catch (Exception error) {
@@ -757,7 +784,9 @@ public class MainActivity extends Activity {
             }
             if (!webReady && harnessFailure == null && harnessStartingAt > 0
                     && android.os.SystemClock.elapsedRealtime() - harnessStartingAt > 90000) {
-                harnessFailure = "Harness 启动超时：" + NodeRuntime.recentLog(getNoBackupFilesDir());
+                harnessFailure = pendingLaunchUrl == null
+                    ? "Harness 启动超时：" + NodeRuntime.recentLog(getNoBackupFilesDir())
+                    : "Harness 服务已启动，页面仍在加载。若长时间无响应，请更新 Android System WebView 后重启应用。";
                 ui.post(() -> setSplashStatus(harnessFailure));
             }
             if (!webReady) ui.postDelayed(this::pollWeb, 3000);
@@ -785,17 +814,11 @@ public class MainActivity extends Activity {
     private void setWizardStatus(String message) {
         ui.post(() -> {
             if (wizardStatus != null && wizardOverlay.getVisibility() == View.VISIBLE && wizardStep == 1)
-                wizardStatus.setText(message);
+                wizardStatus.setText(adb != null && adb.isConnected() ? "无线 ADB 已连接" : message);
             refreshWizardButtons();
         });
     }
 
-    private void setVirtualDisplayStatus(String message) {
-        ui.post(() -> {
-            if (wizardStatus != null && wizardOverlay.getVisibility() == View.VISIBLE && wizardStep == 4)
-                wizardStatus.setText(message);
-        });
-    }
 
     private void setSplashStatus(String message) {
         ui.post(() -> {
@@ -843,6 +866,11 @@ public class MainActivity extends Activity {
     private int dp(int size) { return UiKit.dp(this, size); }
 
     private void verifyKernelUi(int attempt) {
+        verifyKernelUi(attempt, pageGeneration);
+    }
+
+    private void verifyKernelUi(int attempt, int generation) {
+        if (webReady || generation != pageGeneration) return;
         web.evaluateJavascript(
             "(function(){var text=document.body?(document.body.innerText||''):'';" +
             "if(text.indexOf('authentication required')>=0)return 'auth';" +
@@ -850,6 +878,7 @@ public class MainActivity extends Activity {
             "if(main&&main.getBoundingClientRect().height>0)return 'ok';" +
             "return 'wait';})()",
             result -> {
+                if (webReady || generation != pageGeneration) return;
                 if ("\"auth\"".equals(result)) {
                     retryHarnessAuth();
                     return;
@@ -861,7 +890,7 @@ public class MainActivity extends Activity {
                 }
                 if (attempt == 0 || attempt == 5 || attempt == 15 || attempt == 30)
                     captureLayoutDiagnostics("verify-" + attempt);
-                if (attempt < 120) ui.postDelayed(() -> verifyKernelUi(attempt + 1), 1000);
+                if (attempt < 120) ui.postDelayed(() -> verifyKernelUi(attempt + 1, generation), 1000);
             });
     }
 

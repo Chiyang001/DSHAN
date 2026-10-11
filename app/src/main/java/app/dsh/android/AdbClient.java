@@ -26,6 +26,12 @@ import io.github.muntashirakon.adb.AbsAdbConnectionManager;
 import io.github.muntashirakon.adb.AdbStream;
 
 final class AdbClient extends AbsAdbConnectionManager {
+    private static AdbClient instance;
+    static synchronized AdbClient get(Context context) throws Exception {
+        if (instance == null) instance = new AdbClient(context);
+        return instance;
+    }
+    static volatile String pairingStatus = "尚未连接无线 ADB";
     private final PrivateKey key;
     private final Certificate certificate;
     private final Context context;
@@ -67,9 +73,21 @@ final class AdbClient extends AbsAdbConnectionManager {
 
     byte[] execute(String command, int maxBytes) throws Exception {
         if (!isConnected()) throw new IllegalStateException("无线 ADB 尚未连接");
-        AdbStream stream = openStream("exec:" + command);
-        try (InputStream in = stream.openInputStream()) {
-            return readAll(in, maxBytes);
+        AdbStream stream = openStream("shell,v2,raw:" + command);
+        // libadb 3.1.1's InputStream can discard buffered bytes after CLSE;
+        // its raw stream can also wait/throw on EOF. Read raw buffered data
+        // until the shell v2 EXIT frame, never until transport closure.
+        try {
+            return AdbShellProtocol.read(new InputStream() {
+                @Override public int read() throws java.io.IOException {
+                    byte[] value = new byte[1];
+                    int count = read(value, 0, 1);
+                    return count < 0 ? -1 : value[0] & 255;
+                }
+                @Override public int read(byte[] bytes, int offset, int length) throws java.io.IOException {
+                    return stream.read(bytes, offset, length);
+                }
+            }, maxBytes);
         } finally {
             stream.close();
         }

@@ -31,6 +31,9 @@
         android:label="DSHAN"
         android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <service android:name=".AdbPairingService" android:exported="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User initiated wireless ADB pairing through notification inline reply while system pairing dialog remains open" />
+        </service>
         <service android:name=".UnicodeInputService" android:label="DSHAN Unicode 输入" android:exported="true" android:permission="android.permission.BIND_INPUT_METHOD">
             <intent-filter><action android:name="android.view.InputMethod" /></intent-filter>
             <meta-data android:name="android.view.im" android:resource="@xml/unicode_input" />

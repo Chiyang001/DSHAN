@@ -114,6 +114,7 @@ final class BridgeServer {
         if ("status".equals(method)) return new JSONObject()
             .put("connected", deviceConnected())
             .put("transport", transport())
+            .put("secondaryCaptureAvailable", shizuku.isReady() && Build.VERSION.SDK_INT >= 34)
             .put("rootEnabled", rootEnabled).put("rootAvailable", root.isReady())
             .put("controlEnabled", controlEnabled)
             .put("shellEnabled", shellEnabled)
@@ -191,6 +192,12 @@ final class BridgeServer {
             runOnMain(() -> shizuku.request());
             return androidSettings();
         }
+        if ("requestAdbPairing".equals(method)) {
+            runOnMain(() -> context.startActivity(new android.content.Intent(context, MainActivity.class)
+                .putExtra("adbPair", true).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                    | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)));
+            return androidSettings();
+        }
         if ("openStorageSettings".equals(method)) {
             runOnMain(() -> {
                 android.content.Intent intent = new android.content.Intent(
@@ -248,9 +255,9 @@ final class BridgeServer {
         }
         if ("listDirectory".equals(method)) return listDirectory(request);
         if (!deviceConnected())
-            throw new IllegalStateException(rootEnabled ? "Root 模式不可用，请重新检测授权或关闭 Root 模式" : "请先授权 Shizuku 或启用 Root 模式");
+            throw new IllegalStateException(rootEnabled ? "Root 模式不可用，请重新检测授权或关闭 Root 模式" : "请先授权 Shizuku、连接无线 ADB 或启用 Root 模式");
         if (!controlEnabled) throw new IllegalStateException("请在应用内开启“允许 Harness 控制手机”");
-        if ("displays".equals(method)) return new JSONObject().put("displays", shizuku.displays());
+        if ("displays".equals(method)) return new JSONObject().put("displays", displays());
         int displayId = request.has("displayId") ? bounded(request, "displayId", 0, Integer.MAX_VALUE) : 0;
         if (displayId != 0) displayInfo(displayId); // Never fall back to the main display.
         if (request.has("expectedRotation") && request.getInt("expectedRotation") != screenRotation(displayId))
@@ -369,12 +376,25 @@ final class BridgeServer {
     }
 
     private JSONObject displayInfo(int id) throws Exception {
-        JSONArray displays = shizuku.displays();
+        JSONArray displays = displays();
         for (int i = 0; i < displays.length(); i++) {
             JSONObject display = displays.getJSONObject(i);
             if (display.getInt("displayId") == id) return display;
         }
         throw new IllegalStateException("DISPLAY_UNAVAILABLE: 指定副屏已关闭或不存在，未操作主屏");
+    }
+
+    private JSONArray displays() throws Exception {
+        if (shizuku.isReady()) return shizuku.displays();
+        JSONArray result = new JSONArray();
+        android.hardware.display.DisplayManager manager = context.getSystemService(android.hardware.display.DisplayManager.class);
+        for (android.view.Display display : manager.getDisplays()) {
+            android.graphics.Point size = new android.graphics.Point();
+            display.getRealSize(size);
+            result.put(new JSONObject().put("displayId", display.getDisplayId()).put("name", display.getName())
+                .put("width", size.x).put("height", size.y).put("rotation", display.getRotation()));
+        }
+        return result;
     }
 
     private int screenRotation(int id) throws Exception {
@@ -383,9 +403,11 @@ final class BridgeServer {
 
     private JSONObject captureScreenshot(JSONObject request) throws Exception {
         int displayId = request.has("displayId") ? bounded(request, "displayId", 0, Integer.MAX_VALUE) : 0;
+        if (displayId != 0 && !shizuku.isReady())
+            throw new IllegalStateException("SECONDARY_CAPTURE_UNAVAILABLE: 当前 ADB 连接支持主屏截图；副屏截图需要 Shizuku，未切换到主屏");
         final JSONObject[] result = new JSONObject[1];
         HarnessMonitorService.runWithoutOverlay(() -> {
-            result[0] = writeScreenshotPng(displayId == 0 ? execute("screencap -p", 12 * 1024 * 1024)
+            result[0] = writeScreenshotPng(displayId == 0 ? captureMainPng()
                 : shizuku.captureDisplay(displayId));
             result[0].put("displayId", displayId).put("rotation", screenRotation(displayId));
             if (request.optBoolean("fast", false)) prepareFastScreenshot(result[0], request);
@@ -440,7 +462,7 @@ final class BridgeServer {
         final JSONObject[] result = new JSONObject[1];
         HarnessMonitorService.runWithoutOverlay(() -> {
             try {
-                byte[] png = execute("screencap -p", 12 * 1024 * 1024);
+                byte[] png = captureMainPng();
                 JSONObject screenshot = writeScreenshotPng(png);
                 String uiXml;
                 try {
@@ -466,9 +488,17 @@ final class BridgeServer {
         return result[0];
     }
 
+    private byte[] captureMainPng() throws Exception {
+        return execute(ScreenshotCapture.command(java.util.UUID.randomUUID().toString()), 12 * 1024 * 1024);
+    }
+
     private JSONObject writeScreenshotPng(byte[] png) throws Exception {
-        if (png.length < 24 || png[0] != (byte) 0x89 || png[1] != 'P' || png[2] != 'N' || png[3] != 'G')
-            throw new IllegalStateException("截图未返回 PNG 数据");
+        if (!ScreenshotCapture.isPng(png)) {
+            String detail = new String(png, 0, Math.min(png.length, 240), StandardCharsets.UTF_8)
+                .replaceAll("[\\p{Cntrl}&&[^\\n\\t]]", " ").trim();
+            throw new IllegalStateException("截图失败（" + transport() + "）："
+                + (detail.isEmpty() ? "系统截图命令未输出图像，请检查设备连接与截图权限" : detail));
+        }
         int width = pngDimension(png, 16);
         int height = pngDimension(png, 20);
         if (width <= 0 || height <= 0) throw new IllegalStateException("截图尺寸无效");
@@ -499,6 +529,8 @@ final class BridgeServer {
         return storageStatus()
             .put("shizukuConnected", shizuku.isReady())
             .put("shizukuStatus", shizuku.statusMessage())
+            .put("adbConnected", adb.isConnected())
+            .put("adbStatus", adb.isConnected() ? "无线 ADB 已连接" : AdbClient.pairingStatus)
             .put("rootAvailable", root.isReady()).put("rootStatus", root.statusMessage())
             .put("rootEnabled", rootEnabled)
             .put("overlayGranted", android.provider.Settings.canDrawOverlays(context))
@@ -560,7 +592,7 @@ final class BridgeServer {
     }
 
     synchronized void configureVirtualDisplay(boolean enabled) throws Exception {
-        if (!deviceConnected()) throw new IllegalStateException("请先连接 Shizuku 或授权 Root；也可在开发者选项中手动设置");
+        if (!deviceConnected()) throw new IllegalStateException("请先连接 Shizuku、无线 ADB 或授权 Root；也可在开发者选项中手动设置");
         String current = virtualDisplaySetting();
         android.content.SharedPreferences prefs = context.getSharedPreferences("dsh_setup", 0);
         if (enabled) {

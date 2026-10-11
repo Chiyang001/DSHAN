@@ -14,10 +14,22 @@ public final class RemoteShellService extends Binder {
     private static final int EXECUTE = IBinder.FIRST_CALL_TRANSACTION;
     private static final int CAPTURE = EXECUTE + 1;
     private static final int DISPLAYS = EXECUTE + 2;
+    private static final int HEALTH = EXECUTE + 3;
     public RemoteShellService() { }
 
     @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
+        // Shizuku uses this transaction to retire a stale UserService.
+        if (code == 16777115) {
+            System.exit(0);
+            return true;
+        }
+        if (code == HEALTH) {
+            data.enforceInterface(DESCRIPTOR);
+            reply.writeNoException();
+            reply.writeInt(android.os.Process.myUid());
+            return true;
+        }
         if (code == EXECUTE) {
             data.enforceInterface(DESCRIPTOR);
             ParcelFileDescriptor fd = execute(data.readString());
@@ -128,6 +140,17 @@ public final class RemoteShellService extends Binder {
             data.recycle();
             reply.recycle();
         }
+    }
+
+    static void verifyOn(IBinder binder) throws RemoteException {
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(DESCRIPTOR);
+            if (!binder.transact(HEALTH, data, reply, 0)) throw new RemoteException("设备服务版本过旧");
+            reply.readException();
+            int uid = reply.readInt();
+            if (uid != 0 && uid != 2000) throw new RemoteException("设备服务未取得 shell 或 Root 权限");
+        } finally { data.recycle(); reply.recycle(); }
     }
 
     private ParcelFileDescriptor execute(String command) throws RemoteException {
