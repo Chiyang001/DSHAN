@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 
 export const MAX_BYTES = 16 * 1024 * 1024;
 export function endpoint(value, allowHttp = false) {
@@ -15,6 +16,8 @@ export function decodePair(code, allowHttp = false) {
   if (typeof code !== 'string' || !code.startsWith('dsh-peer:') || code.length > 4096) throw new Error('Invalid pairing code');
   const pair = JSON.parse(Buffer.from(code.slice(9), 'base64url').toString());
   if (pair.v !== 1 || !/^[a-f0-9]{32}$/.test(pair.room) || !/^[A-Za-z0-9_-]{43}$/.test(pair.secret)) throw new Error('Invalid pairing code');
+  if (pair.mode !== undefined && !['auto', 'relay', 'p2p'].includes(pair.mode)) throw new Error('Invalid connection mode');
+  if (pair.signalingAddress !== undefined && !isIP(pair.signalingAddress)) throw new Error('Invalid signaling address');
   pair.server = endpoint(pair.server, allowHttp);
   return pair;
 }

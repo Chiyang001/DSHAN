@@ -4,15 +4,19 @@ import { pathToFileURL } from 'node:url';
 
 export function createSignalServer({ port = 8787, host = '127.0.0.1', ttl = 10 * 60_000, maxRooms = 1000 } = {}) {
   const rooms = new Map();
-  const http = createServer((req, res) => { res.writeHead(req.url === '/health' ? 200 : 404); res.end(req.url === '/health' ? 'ok' : 'Not found'); });
+  const http = createServer((req, res) => { res.writeHead(req.url === '/health' ? 200 : 404,
+    { 'X-DSH-Peer-Relay': '1', 'Content-Type': 'text/plain; charset=utf-8' }); res.end(req.url === '/health' ? 'ok' : 'Not found'); });
   const wss = new WebSocketServer({ server: http, maxPayload: 128 * 1024, perMessageDeflate: false });
   wss.on('connection', ws => {
     let room, role, count = 0;
+    let windowStart = Date.now(), windowBytes = 0;
     const joinTimer = setTimeout(() => ws.close(1008, 'Join timeout'), 5000);
+    ws.alive = true;
+    ws.on('pong', () => { ws.alive = true; });
     ws.on('message', raw => {
       try {
-        if (++count > 100) throw new Error('Signal limit');
         const msg = JSON.parse(raw.toString());
+        if (msg.type !== 'relay-data' && ++count > 100) throw new Error('Signal limit');
         if (!room) {
           if (msg.type !== 'join' || !/^[a-f0-9]{32}$/.test(msg.room) || !/^[a-f0-9]{64}$/.test(msg.access) || !['host', 'guest'].includes(msg.role)) throw new Error('Invalid join');
           room = rooms.get(msg.room);
@@ -26,13 +30,22 @@ export function createSignalServer({ port = 8787, host = '127.0.0.1', ttl = 10 *
           ws.send(JSON.stringify({ type: 'waiting' }));
           if (room.peers.host && room.peers.guest) {
             room.used = true;
-            for (const peer of Object.values(room.peers)) peer.send(JSON.stringify({ type: 'ready' }));
+            for (const peer of Object.values(room.peers)) peer.send(JSON.stringify({ type: 'ready', relay: true }));
           }
         } else {
-          if (msg.type !== 'signal' || typeof msg.payload !== 'string' || typeof msg.tag !== 'string') throw new Error('Invalid signal');
           const other = room.peers[role === 'host' ? 'guest' : 'host'];
           if (!other || other.readyState !== WebSocket.OPEN) throw new Error('Peer unavailable');
-          other.send(JSON.stringify({ type: 'signal', payload: msg.payload, tag: msg.tag }));
+          if (msg.type === 'relay-data') {
+            if (!room.used || typeof msg.seq !== 'string' || msg.seq.length > 20 || typeof msg.data !== 'string'
+                || msg.data.length > 48000 || typeof msg.tag !== 'string' || !/^[a-f0-9]{32}$/.test(msg.tag)
+                || typeof msg.end !== 'boolean') throw new Error('Invalid relay frame');
+            if (Date.now() - windowStart > 1000) { windowStart = Date.now(); windowBytes = 0; }
+            if ((windowBytes += raw.length) > 32 * 1024 * 1024 || other.bufferedAmount > 32 * 1024 * 1024) throw new Error('Relay capacity exceeded');
+            other.send(JSON.stringify({ type: 'relay-data', seq: msg.seq, data: msg.data, tag: msg.tag, end: msg.end }));
+          } else {
+            if (msg.type !== 'signal' || typeof msg.payload !== 'string' || typeof msg.tag !== 'string') throw new Error('Invalid signal');
+            other.send(JSON.stringify({ type: 'signal', payload: msg.payload, tag: msg.tag }));
+          }
         }
       } catch { ws.close(1008, 'Pair rejected'); }
     });
@@ -46,14 +59,21 @@ export function createSignalServer({ port = 8787, host = '127.0.0.1', ttl = 10 *
     });
   });
   const timer = setInterval(() => {
-    for (const room of rooms.values()) if (Date.now() >= room.expires) {
+    for (const room of rooms.values()) if (!room.used && Date.now() >= room.expires) {
       for (const peer of Object.values(room.peers)) peer.close(1000, 'Pair expired');
       rooms.delete(room.id);
     }
   }, 1000);
   timer.unref();
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (!ws.alive) { ws.terminate(); continue; }
+      ws.alive = false; ws.ping();
+    }
+  }, 30000);
+  heartbeat.unref();
   http.listen(port, host);
-  return { http, rooms, async close() { clearInterval(timer); for (const ws of wss.clients) ws.terminate(); await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => http.close(resolve)); } };
+  return { http, rooms, async close() { clearInterval(timer); clearInterval(heartbeat); for (const ws of wss.clients) ws.terminate(); await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => http.close(resolve)); } };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const server = createSignalServer({ port: Number(process.env.PORT || 8787), host: process.env.HOST || '127.0.0.1' });

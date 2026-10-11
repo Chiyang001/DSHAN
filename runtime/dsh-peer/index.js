@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Peer } from './peer.js';
 import { createPair, encodePair, decodePair } from './protocol.js';
 import { androidHostAddresses } from './network.js';
+import { isIP } from 'node:net';
 
 export const name = 'dsh-peer';
 export const inject = ['tools', 'agents'];
@@ -56,6 +57,7 @@ export function apply(ctx, config = {}) {
     if (names.some(item => !available.has(item))) { owner = undefined; allowed.clear(); throw new Error('Some tools are unavailable in this session. Use native tool mode and choose enabled tools.'); }
   };
   const connect = async (pair, role, exec, tools, iceServersJson) => {
+    if (config.relayOnly === true && pair.mode === 'relay') throw new Error('relayOnly requires TURN; disable relayOnly to use encrypted WebSocket relay');
     const iceServers = iceServersJson ? JSON.parse(iceServersJson) : config.iceServers ?? [];
     if (!Array.isArray(iceServers) || iceServers.length > 8) throw new Error('ICE servers must be a JSON array with at most eight entries');
     for (const server of iceServers) {
@@ -71,8 +73,15 @@ export function apply(ctx, config = {}) {
     server: string('Signaling server wss:// URL (ws:// loopback allowed for tests)'), tools: string('Comma-separated local tool names to share; empty string disables incoming calls'),
     ice_servers_json: { type: 'string', description: 'Optional JSON array of STUN/TURN servers with urls, username and credential; otherwise uses plugin configuration' },
     allow_http_signaling: { type: 'boolean', description: 'Explicitly allow ws:// signaling for a user-configured HTTP FRP entrance. Signaling metadata is visible; tool data stays encrypted and peer descriptions stay authenticated.' },
+    connection_mode: { type: 'string', enum: ['auto', 'relay', 'p2p'], description: 'Default auto: prefer P2P and fall back to encrypted FRP relay. relay forces encrypted relay; p2p disables fallback.' },
+    signaling_address: { type: 'string', description: 'Optional actual FRP server IPv4/IPv6 address supplied by the user. Keeps domain Host/TLS verification while avoiding broken or VPN fake-IP DNS.' },
   }, async (args, exec) => {
-    const pair = createPair(args.server, args.allow_http_signaling === true); await connect(pair, 'host', exec, args.tools, args.ice_servers_json);
+    const pair = createPair(args.server, args.allow_http_signaling === true);
+    pair.mode = args.connection_mode ?? config.connectionMode ?? 'auto';
+    pair.signalingAddress = args.signaling_address ?? config.signalingAddress;
+    if (pair.signalingAddress !== undefined && !isIP(pair.signalingAddress)) throw new Error('Invalid signaling address');
+    if (!['auto', 'relay', 'p2p'].includes(pair.mode)) throw new Error('Invalid connection mode');
+    await connect(pair, 'host', exec, args.tools, args.ice_servers_json);
     return 'Pairing code (expires in 2 minutes): ' + encodePair(pair) + '\nShared tools: ' + [...allowed].join(', ');
   });
   register('peer_join', 'Join another Harness using its private pairing code. Share only the specified local tools. Only run after the user requests pairing.', {

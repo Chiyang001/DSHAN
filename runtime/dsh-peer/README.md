@@ -1,6 +1,6 @@
-# DSH Peer 0.1.1
+# DSH Peer 0.1.2
 
-DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN 和电脑 DSH 使用同一份 JavaScript 插件，通过 WebRTC 数据通道调用对方明确共享的工具。没有额外安装桌面 ADB 的要求；手机操作仍走 DSHAN 本机的 ADB/Shizuku 桥接。
+DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN 和电脑 DSH 使用同一份 JavaScript 插件，优先通过 WebRTC 直连；连接未成功时，通过配对服务加密中继，调用对方明确共享的工具。没有额外安装桌面 ADB 的要求；手机操作仍走 DSHAN 本机的 ADB/Shizuku 桥接。
 
 ## 安装
 
@@ -27,9 +27,17 @@ DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN �
 4. `peer_status` 显示 connected 后，调用 `peer_tools` 获取对方工具及参数，再通过 `peer_call` 调用。电脑端拿到手机截图、snapshot_id 后，继续调用手机点击/滑动；手机端也可调用电脑端共享的文件、终端或其他 Harness 工具。
 5. `peer_disconnect` 立即断开并撤销共享。关闭共享会话或退出应用也会撤销。连接只属于创建它的本机会话，不会自动恢复或迁移到其他会话。
 
-手机端无需编辑配置文件，也可在创建/加入配对时给 `ice_servers_json` 参数传上述 STUN/TURN 设置的 JSON 数组。**两端都需要配置 ICE 服务器**，否则通常只能在可直接互通的网络里连接。
+手机端无需编辑配置文件，也可在创建/加入配对时给 `ice_servers_json` 参数传上述 STUN/TURN 设置的 JSON 数组。配置 STUN/TURN 可以增加 WebRTC 直连/中继的可用性；新版配对服务还提供加密 WebSocket 中继，因此没有 TURN 时仍可跨网络通信。
 
-已有 HTTP 类型 FRP 入口时，先在其转发的本地端口运行信令服务，然后使用 `ws://域名`，并在两端的配对工具参数中明确传 `allow_http_signaling: true`。默认仍要求公网 WSS。HTTP 信令会暴露连接元数据，工具数据仍通过 DTLS 加密，SDP 仍经过 HMAC 验证。HTTP FRP 不提供 TURN 中继，不能代替跨网络所需的 STUN/TURN。
+已有 HTTP 类型 FRP 入口时，在 Windows 上运行 `deploy/start-frp.ps1 -FrpConfig '你的 frpc.ini 完整路径'`。脚本启动该配置的本地信令/加密中继服务及 frpc，并识别已运行的新版服务；默认读取 `DSHAN_P2P` 段，可用 `-Section` 更改。需要 Node.js 22 或更新版本，找不到 Node 时传 `-NodePath`。
+
+使用 `ws://域名`，两端的配对工具参数都传 `allow_http_signaling: true`。默认仍要求公网 WSS。HTTP 信令会暴露连接元数据，SDP 仍经过 HMAC 验证；直连数据使用 DTLS，中继数据使用 AES-256-GCM 端到端加密，服务器没有解密密钥。
+
+`peer_host` 的 `connection_mode` 默认为 `auto`：直连优先，约 8 秒未连接后协商加密中继；`relay` 强制使用加密中继；`p2p` 禁用该回退。模式包含在配对码中，两端自动一致。已有连接断线或工具调用失败不会切换通道重试，以免重复执行操作。两端插件及配对服务器都必须更新到 0.1.2；仅升级手机无法使旧服务器提供中继。
+
+如用户提供了 FRP 服务器的实际 IP，可选填 `peer_host.signaling_address` 或插件配置 `signalingAddress`。它只指定连接地址，保留原域名的 HTTP Host、TLS SNI 和证书验证，可用于 DNS 异常场景。普通使用不需要此参数。
+
+跨网络要求两端都有可用外网。手机关闭 Wi-Fi 前应开启移动数据；VPN 显示已连接并不说明底层移动网络可用。
 
 ```json
 [{"urls":"stun:turn.example.com:3478"},{"urls":"turn:turn.example.com:3478?transport=tcp","username":"dsh-peer","credential":"your-turn-password"}]
@@ -47,7 +55,7 @@ DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN �
 
 当前 WebRTC 依赖只使用列表中的第一个 STUN 和第一个 TURN 地址，不会依次尝试多个 TURN 地址。示例选择 TURN/TCP；如需改成 UDP，请明确将该 URL 改为 `?transport=udp` 后重新配对。
 
-信令服务器只交换经过配对秘密 HMAC 验证的 SDP；数据通道使用 WebRTC DTLS。信令端看不到工具调用内容，TURN 转发加密数据。配对房间最多容纳两端，不支持复用旧码；服务重启/断线后重新配对。
+配对服务器交换经过配对秘密 HMAC 验证的 SDP 和中继协商信息；必要时转发加密的数据分片。中继使用配对秘密派生的双向独立密钥、会话随机值、递增 nonce 和消息认证，拒绝篡改、反射和重放。服务器看不到工具内容。配对房间最多两端、不复用旧码；服务重启/中继断线后重新配对。已配对房间不再因配对等待期限而结束，服务使用心跳清理失联连接。
 
 ## 权限与限制
 
@@ -59,4 +67,4 @@ DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN �
 
 ## 验证
 
-在本目录执行 `npm test`。测试覆盖真实 WebRTC 双向数据通道、较大结果分片、配对描述篡改/重放拒绝、工具限制、取消、断线及 UDP 握手乱序/重传。手机和电脑的实际验收及尚未通过的项目见 [LIVE-VALIDATION.md](LIVE-VALIDATION.md)。
+在本目录执行 `npm test`。测试覆盖真实 WebRTC 双向数据通道、自动/强制加密中继、较大结果分片、认证与重放拒绝、工具限制、取消、断线及 UDP 握手乱序/重传。手机和电脑的实际验收及限制见 [LIVE-VALIDATION.md](LIVE-VALIDATION.md)。

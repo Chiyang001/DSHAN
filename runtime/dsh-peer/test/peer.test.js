@@ -13,6 +13,8 @@ test('private pair codes and authenticated descriptions reject changes and repla
   assert.throws(() => decodePair(encodePair(httpPair)));
   assert.deepEqual(decodePair(encodePair(httpPair), true), httpPair);
   assert.throws(() => decodePair('bad'));
+  assert.throws(() => decodePair(encodePair({ ...pair, signalingAddress: 'invalid-address' })));
+  assert.throws(() => decodePair(encodePair({ ...pair, mode: 'unknown' })));
   const message = sign(pair, 'host', 0, { type: 'offer', sdp: 'fingerprint' });
   assert.equal(verify(pair, 'host', 0, message).sdp, 'fingerprint');
   assert.throws(() => verify(pair, 'guest', 0, message));
