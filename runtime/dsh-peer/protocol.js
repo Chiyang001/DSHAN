@@ -1,21 +1,21 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 export const MAX_BYTES = 16 * 1024 * 1024;
-export function endpoint(value) {
+export function endpoint(value, allowHttp = false) {
   const url = new URL(value);
   if (url.username || url.password || url.hash || !['ws:', 'wss:'].includes(url.protocol)) throw new Error('Invalid signaling URL');
-  if (url.protocol !== 'wss:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Public signaling requires wss://');
+  if (!allowHttp && url.protocol !== 'wss:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Public signaling requires wss://; for an explicitly configured HTTP FRP entrance, enable allow_http_signaling');
   return url.href;
 }
-export function createPair(server) {
-  return { v: 1, server: endpoint(server), room: randomBytes(16).toString('hex'), secret: randomBytes(32).toString('base64url') };
+export function createPair(server, allowHttp = false) {
+  return { v: 1, server: endpoint(server, allowHttp), room: randomBytes(16).toString('hex'), secret: randomBytes(32).toString('base64url') };
 }
 export function encodePair(pair) { return 'dsh-peer:' + Buffer.from(JSON.stringify(pair)).toString('base64url'); }
-export function decodePair(code) {
+export function decodePair(code, allowHttp = false) {
   if (typeof code !== 'string' || !code.startsWith('dsh-peer:') || code.length > 4096) throw new Error('Invalid pairing code');
   const pair = JSON.parse(Buffer.from(code.slice(9), 'base64url').toString());
   if (pair.v !== 1 || !/^[a-f0-9]{32}$/.test(pair.room) || !/^[A-Za-z0-9_-]{43}$/.test(pair.secret)) throw new Error('Invalid pairing code');
-  pair.server = endpoint(pair.server);
+  pair.server = endpoint(pair.server, allowHttp);
   return pair;
 }
 export function mac(secret, value) { return createHmac('sha256', secret).update(value).digest('hex'); }

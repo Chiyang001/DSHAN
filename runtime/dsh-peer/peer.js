@@ -2,18 +2,30 @@ import { RTCPeerConnection } from 'werift';
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
 import { ChannelWire, mac, sign, verify } from './protocol.js';
+import { guardDuplicateHelloVerify } from './dtls-compat.js';
 
 export class Peer {
   constructor({ pair, role, iceServers = [], hostAddresses, relayOnly = false, dispatch, timeout = 120_000 }) {
     this.pair = pair; this.role = role; this.dispatch = dispatch; this.timeout = timeout;
     this.state = 'connecting'; this.pending = new Map(); this.running = new Map(); this.seen = new Set();
     this.sequence = 0; this.inSequence = 0; this.signalQueue = Promise.resolve();
+    this.diagnostics = {};
     this.pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: relayOnly ? 'relay' : 'all',
       // Android restricts native interface enumeration. Use Android's active
       // network addresses instead of Node's os.networkInterfaces() there.
       ...(hostAddresses ? { iceUseIpv4: false, iceUseIpv6: false, iceAdditionalHostAddresses: hostAddresses } : {}),
     });
-    this.pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(this.pc.connectionState)) void this.close('Peer disconnected; action outcome may be unknown'); };
+    const record = () => {
+      this.diagnostics.connectionState = this.pc.connectionState;
+      this.diagnostics.iceState = this.pc.iceConnectionState;
+      this.diagnostics.localCandidates = (this.pc.localDescription?.sdp.match(/^a=candidate:/gm) ?? []).length;
+      this.diagnostics.remoteCandidates = (this.pc.remoteDescription?.sdp.match(/^a=candidate:/gm) ?? []).length;
+    };
+    this.pc.oniceconnectionstatechange = record;
+    this.pc.onconnectionstatechange = () => {
+      record();
+      if (['failed', 'closed'].includes(this.pc.connectionState)) void this.close(`Peer connection ${this.pc.connectionState} (ICE ${this.pc.iceConnectionState}); action outcome may be unknown`);
+    };
     this.pc.ondatachannel = ({ channel }) => this.attach(channel);
     if (role === 'host') this.attach(this.pc.createDataChannel('dsh-peer-v1', { ordered: true }));
     this.ready = new Promise((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
@@ -29,12 +41,14 @@ export class Peer {
         if (this.state === 'closed') return;
         const message = JSON.parse(data.toString());
         if (message.type === 'ready' && role === 'host') {
-          await this.pc.setLocalDescription(await this.pc.createOffer());
+          const offer = await this.pc.createOffer(); this.watchDtls();
+          await this.pc.setLocalDescription(offer);
           this.signal({ type: 'offer', sdp: this.pc.localDescription.sdp });
         } else if (message.type === 'signal') {
           const body = verify(pair, role === 'host' ? 'guest' : 'host', this.inSequence++, message);
           if (body.type !== (role === 'host' ? 'answer' : 'offer') || typeof body.sdp !== 'string') throw new Error('Unexpected peer description');
           await this.pc.setRemoteDescription(body);
+          this.watchDtls();
           if (role === 'guest') {
             await this.pc.setLocalDescription(await this.pc.createAnswer());
             this.signal({ type: 'answer', sdp: this.pc.localDescription.sdp });
@@ -46,6 +60,21 @@ export class Peer {
   signal(body) {
     if (this.ws.readyState !== WebSocket.OPEN) throw new Error('Signaling disconnected');
     this.ws.send(JSON.stringify({ type: 'signal', ...sign(this.pair, this.role, this.sequence++, body) }));
+  }
+  watchDtls() {
+    for (const transport of this.pc.dtlsTransports) {
+      if (transport.peerDiagnostic) continue;
+      transport.peerDiagnostic = true;
+      const start = transport.start.bind(transport);
+      transport.start = async () => {
+        try {
+          const operation = start();
+          guardDuplicateHelloVerify(transport.dtls);
+          return await operation;
+        }
+        catch (error) { this.diagnostics.dtlsError = error.message || error.name || 'DTLS handshake failed'; throw error; }
+      };
+    }
   }
   attach(channel) {
     if (this.channel || channel.label !== 'dsh-peer-v1') { channel.close(); return; }
@@ -110,5 +139,5 @@ export class Peer {
     this.closing = this.pc.close().catch(() => {});
     return this.closing;
   }
-  status() { return { state: this.state, transport: 'WebRTC ICE/DTLS/SCTP', relayOnly: this.pc.config?.iceTransportPolicy === 'relay', error: this.error ?? null }; }
+  status() { return { state: this.state, transport: 'WebRTC ICE/DTLS/SCTP', relayOnly: this.pc.config?.iceTransportPolicy === 'relay', diagnostics: this.diagnostics, error: this.error ?? null }; }
 }

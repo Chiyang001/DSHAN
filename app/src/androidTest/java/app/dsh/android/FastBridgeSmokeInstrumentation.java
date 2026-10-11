@@ -21,6 +21,7 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
     private boolean adbStreamCheck;
     private boolean captureOnly;
     private boolean shizukuLifecycleCheck;
+    private int peerLivePort;
     private int launchDisplay = -1;
     private int unicodeDisplay;
 
@@ -33,6 +34,7 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
         adbStreamCheck = arguments != null && "true".equals(arguments.getString("adbStreamCheck"));
         captureOnly = arguments != null && "true".equals(arguments.getString("captureOnly"));
         shizukuLifecycleCheck = arguments != null && "true".equals(arguments.getString("shizukuLifecycleCheck"));
+        if (arguments != null && arguments.containsKey("peerLivePort")) peerLivePort = Integer.parseInt(arguments.getString("peerLivePort"));
         if (arguments != null && arguments.containsKey("launchDisplay")) launchDisplay = Integer.parseInt(arguments.getString("launchDisplay"));
         if (arguments != null && arguments.containsKey("unicodeDisplay")) unicodeDisplay = Integer.parseInt(arguments.getString("unicodeDisplay"));
         start();
@@ -91,6 +93,40 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
     @Override public void onStart() {
         Bundle report = new Bundle();
         try {
+            if (peerLivePort > 0) {
+                startActivitySync(new Intent(getTargetContext(), MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                AdbClient client = AdbClient.get(getTargetContext());
+                check(client.connect("127.0.0.1", peerLivePort), "DSHAN internal ADB connects to local daemon");
+                check(new String(client.execute("id -u", 1024), java.nio.charset.StandardCharsets.UTF_8).trim().equals("2000"), "Internal ADB shell UID verified");
+                Bundle ready = new Bundle(); ready.putString("peerLive", "INTERNAL_ADB_READY"); sendStatus(1, ready);
+                java.io.File stop = new java.io.File(getTargetContext().getNoBackupFilesDir(), "peer-live-stop");
+                long deadline = android.os.SystemClock.elapsedRealtime() + 900000;
+                android.app.Activity inputActivity = null;
+                java.io.File inputRequest = new java.io.File(getTargetContext().getNoBackupFilesDir(), "peer-live-input");
+                while (!stop.exists() && android.os.SystemClock.elapsedRealtime() < deadline) {
+                    if (inputRequest.exists()) {
+                        inputRequest.delete();
+                        inputActivity = startActivitySync(new Intent().setClassName(getTargetContext(),
+                            "app.dsh.android.UnicodeInputTestActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    }
+                    if (inputActivity != null) {
+                        android.app.Activity editorActivity = inputActivity;
+                        java.util.concurrent.atomic.AtomicReference<String> value = new java.util.concurrent.atomic.AtomicReference<>();
+                        runOnMainSync(() -> {
+                            try {
+                                java.lang.reflect.Field field = editorActivity.getClass().getDeclaredField("editor");
+                                field.setAccessible(true);
+                                value.set(((android.widget.EditText) field.get(editorActivity)).getText().toString());
+                            } catch (Exception exception) { throw new RuntimeException(exception); }
+                        });
+                        java.nio.file.Files.write(new java.io.File(getTargetContext().getNoBackupFilesDir(),
+                            "peer-live-input-result").toPath(), value.get().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    }
+                    Thread.sleep(250);
+                }
+                if (stop.exists()) stop.delete();
+                report.putString("peerLive", "LIVE_TEST_FINISHED"); finish(-1, report); return;
+            }
             if (shizukuLifecycleCheck) {
                 verifyShizukuLifecycle(report);
                 finish(-1, report);

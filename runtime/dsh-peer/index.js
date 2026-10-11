@@ -70,15 +70,17 @@ export function apply(ctx, config = {}) {
   register('peer_host', 'Create a one-use P2P pairing code and share only the named local tools. Only run after the user requests pairing. Keep the code private; it grants remote access.', {
     server: string('Signaling server wss:// URL (ws:// loopback allowed for tests)'), tools: string('Comma-separated local tool names to share; empty string disables incoming calls'),
     ice_servers_json: { type: 'string', description: 'Optional JSON array of STUN/TURN servers with urls, username and credential; otherwise uses plugin configuration' },
+    allow_http_signaling: { type: 'boolean', description: 'Explicitly allow ws:// signaling for a user-configured HTTP FRP entrance. Signaling metadata is visible; tool data stays encrypted and peer descriptions stay authenticated.' },
   }, async (args, exec) => {
-    const pair = createPair(args.server); await connect(pair, 'host', exec, args.tools, args.ice_servers_json);
+    const pair = createPair(args.server, args.allow_http_signaling === true); await connect(pair, 'host', exec, args.tools, args.ice_servers_json);
     return 'Pairing code (expires in 2 minutes): ' + encodePair(pair) + '\nShared tools: ' + [...allowed].join(', ');
   });
   register('peer_join', 'Join another Harness using its private pairing code. Share only the specified local tools. Only run after the user requests pairing.', {
     code: string('Complete dsh-peer: pairing code'), tools: string('Comma-separated local tool names to share; empty string disables incoming calls'),
     ice_servers_json: { type: 'string', description: 'Optional JSON array of STUN/TURN servers; configure on both ends for cross-network access' },
+    allow_http_signaling: { type: 'boolean', description: 'Explicitly allow a user-configured HTTP FRP entrance; tool data remains encrypted' },
   }, async (args, exec) => {
-    await connect(decodePair(args.code.trim()), 'guest', exec, args.tools, args.ice_servers_json);
+    await connect(decodePair(args.code.trim(), args.allow_http_signaling === true), 'guest', exec, args.tools, args.ice_servers_json);
     return 'Connecting. Use peer_status before calling remote tools.';
   });
   register('peer_status', 'Show P2P connection status and tools shared by this device.', {}, async () => JSON.stringify({ ...(peer?.status() ?? { state: 'disconnected' }), sharedTools: [...allowed], sessionId: owner?.id ?? null }));

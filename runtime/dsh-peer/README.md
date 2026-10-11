@@ -1,10 +1,10 @@
-# DSH Peer 0.1.0
+# DSH Peer 0.1.1
 
 DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN 和电脑 DSH 使用同一份 JavaScript 插件，通过 WebRTC 数据通道调用对方明确共享的工具。没有额外安装桌面 ADB 的要求；手机操作仍走 DSHAN 本机的 ADB/Shizuku 桥接。
 
 ## 安装
 
-需要 Node.js 22 或更新版本，当前验证的 Harness 内核版本为 `0.1.7-rc.2`。DSHAN 的内置运行环境已集成插件。电脑端复制本目录到固定位置，在该目录执行 `npm ci --ignore-scripts`，通过 Harness 插件配置添加：
+需要 Node.js 22 或更新版本，已验证手机内核 `0.1.7-rc.2` 和桌面端 `0.2.0-rc.2`。DSHAN 的内置运行环境已集成插件。电脑端复制本目录到固定位置，在该目录执行 `npm ci --ignore-scripts`，通过 Harness 插件配置添加：
 
 ```yaml
 - id: dsh-peer
@@ -28,6 +28,8 @@ DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN �
 5. `peer_disconnect` 立即断开并撤销共享。关闭共享会话或退出应用也会撤销。连接只属于创建它的本机会话，不会自动恢复或迁移到其他会话。
 
 手机端无需编辑配置文件，也可在创建/加入配对时给 `ice_servers_json` 参数传上述 STUN/TURN 设置的 JSON 数组。**两端都需要配置 ICE 服务器**，否则通常只能在可直接互通的网络里连接。
+
+已有 HTTP 类型 FRP 入口时，先在其转发的本地端口运行信令服务，然后使用 `ws://域名`，并在两端的配对工具参数中明确传 `allow_http_signaling: true`。默认仍要求公网 WSS。HTTP 信令会暴露连接元数据，工具数据仍通过 DTLS 加密，SDP 仍经过 HMAC 验证。HTTP FRP 不提供 TURN 中继，不能代替跨网络所需的 STUN/TURN。
 
 ```json
 [{"urls":"stun:turn.example.com:3478"},{"urls":"turn:turn.example.com:3478?transport=tcp","username":"dsh-peer","credential":"your-turn-password"}]
@@ -57,4 +59,4 @@ DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN �
 
 ## 验证
 
-在本目录执行 `npm test`。测试覆盖真实 WebRTC 双向数据通道、较大结果分片、配对描述篡改/重放拒绝、工具限制、取消和断线。公网 STUN/TURN、真实手机与电脑之间的端到端验收需要实际部署服务后进行。
+在本目录执行 `npm test`。测试覆盖真实 WebRTC 双向数据通道、较大结果分片、配对描述篡改/重放拒绝、工具限制、取消、断线及 UDP 握手乱序/重传。手机和电脑的实际验收及尚未通过的项目见 [LIVE-VALIDATION.md](LIVE-VALIDATION.md)。

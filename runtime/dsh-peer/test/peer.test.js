@@ -9,6 +9,9 @@ test('private pair codes and authenticated descriptions reject changes and repla
   const pair = createPair('wss://example.org/peer');
   assert.deepEqual(decodePair(encodePair(pair)), pair);
   assert.throws(() => createPair('ws://example.org'));
+  const httpPair = createPair('ws://example.org', true);
+  assert.throws(() => decodePair(encodePair(httpPair)));
+  assert.deepEqual(decodePair(encodePair(httpPair), true), httpPair);
   assert.throws(() => decodePair('bad'));
   const message = sign(pair, 'host', 0, { type: 'offer', sdp: 'fingerprint' });
   assert.equal(verify(pair, 'host', 0, message).sdp, 'fingerprint');
