@@ -5,6 +5,7 @@ const { install } = require('./android-network.cjs')
 
 test('Android DNS fallback preserves native success/errors and supports family/all/order', async () => {
   const original = dns.lookup
+  const originalPromise = dns.promises.lookup
   const error = Object.assign(new Error('native DNS failed'), { code: 'ENOTFOUND' })
   let mode = 'failure', calls = 0
   dns.lookup = (_host, _options, callback) => queueMicrotask(() => mode === 'success'
@@ -19,11 +20,15 @@ test('Android DNS fallback preserves native success/errors and supports family/a
     assert.deepEqual(await lookup(4), { address: '127.0.0.1', family: 4 })
     assert.deepEqual((await lookup({ all: true, order: 'ipv4first' })).address,
       [{ address: '127.0.0.1', family: 4 }, { address: '::1', family: 6 }])
+    assert.deepEqual(await dns.promises.lookup('example.test', { family: 6 }), { address: '::1', family: 6 })
+    assert.deepEqual(await dns.promises.lookup('example.test', { all: true, order: 'ipv4first' }),
+      [{ address: '127.0.0.1', family: 4 }, { address: '::1', family: 6 }])
     const before = calls
     mode = 'success'
     assert.equal((await lookup(4)).address, '127.0.0.1')
     assert.equal(calls, before)
     mode = 'bridgeFailure'
     await assert.rejects(lookup(4), e => e === error)
-  } finally { dns.lookup = original; require('node:module').syncBuiltinESMExports() }
+    await assert.rejects(dns.promises.lookup('example.test', { family: 4 }), e => e === error)
+  } finally { dns.lookup = original; dns.promises.lookup = originalPromise; require('node:module').syncBuiltinESMExports() }
 })

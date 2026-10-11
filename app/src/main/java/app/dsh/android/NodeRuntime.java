@@ -107,6 +107,7 @@ final class NodeRuntime {
                     .replace("__ANDROID_SEARCH_PATH__", new File(runtime, "android-fs-search.js").getAbsolutePath().replace('\\', '/'))
                     .replace("__ANDROID_HOST_PATH__", hostPath)
                     .replace("__ANDROID_SETTINGS_PATH__", new File(androidSettings, "index.js").getAbsolutePath().replace('\\', '/'))
+                    .replace("__PEER_PLUGIN_PATH__", new File(bundledRuntime, "dsh-peer/index.js").getAbsolutePath().replace('\\', '/'))
                     .replace("__DIRECTORY_PICKER_PATH__", pickerPath)
                     .getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 clearNodeCompileCache(context.getCacheDir());

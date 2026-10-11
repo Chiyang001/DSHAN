@@ -18,6 +18,8 @@
       name: '__ANDROID_HOST_PATH__'
     - id: android-settings
       name: '__ANDROID_SETTINGS_PATH__'
+    - id: dsh-peer
+      name: '__PEER_PLUGIN_PATH__'
     - id: preset-android
       name: '@deepseek-ai/dsh-agent-preset'
       config:

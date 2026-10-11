@@ -121,6 +121,19 @@ final class BridgeServer {
             .put("device", Build.MANUFACTURER + " " + Build.MODEL)
             .put("android", Build.VERSION.RELEASE);
         if ("storageStatus".equals(method)) return storageStatus();
+        if ("peerNetworkAddresses".equals(method)) {
+            android.net.ConnectivityManager connectivity = (android.net.ConnectivityManager)
+                context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            android.net.Network network = connectivity.getActiveNetwork();
+            android.net.LinkProperties links = network == null ? null : connectivity.getLinkProperties(network);
+            JSONArray addresses = new JSONArray();
+            if (links != null) for (android.net.LinkAddress link : links.getLinkAddresses()) {
+                InetAddress address = link.getAddress();
+                if (!address.isLoopbackAddress() && !address.isLinkLocalAddress() && !address.isAnyLocalAddress())
+                    addresses.put(address.getHostAddress());
+            }
+            return new JSONObject().put("addresses", addresses);
+        }
         if ("resolveHost".equals(method)) {
             String host = request.getString("hostname");
             if (!host.matches("[A-Za-z0-9.-]{1,253}")) throw new IllegalArgumentException("无效主机名");

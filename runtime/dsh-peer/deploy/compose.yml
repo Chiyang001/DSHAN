@@ -1,0 +1,48 @@
+services:
+  signal:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    networks: [peer]
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      SIGNAL_DOMAIN: ${SIGNAL_DOMAIN:?Set SIGNAL_DOMAIN}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [peer]
+  turn:
+    image: coturn/coturn:4.6.3
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --no-cli
+      - --no-multicast-peers
+      - --fingerprint
+      - --lt-cred-mech
+      - --realm=${TURN_DOMAIN:?Set TURN_DOMAIN}
+      - --user=${TURN_USER:?Set TURN_USER}:${TURN_PASSWORD:?Set TURN_PASSWORD}
+      - --external-ip=${PUBLIC_IP:?Set PUBLIC_IP}
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --no-tls
+      - --no-dtls
+      - --log-file=stdout
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=224.0.0.0-255.255.255.255
+networks:
+  peer:
+volumes:
+  caddy-data:
+  caddy-config:

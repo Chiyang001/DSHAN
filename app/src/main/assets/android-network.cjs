@@ -53,5 +53,13 @@ exports.install = function (resolveSystem = systemLookup) {
       }, () => callback(error))
     })
   }
+  // WebRTC's STUN/TURN lookup uses the promise API. It must use the same
+  // Android resolver fallback as WebSocket and other callback consumers.
+  dns.promises.lookup = (hostname, options = {}) => new Promise((resolve, reject) => {
+    dns.lookup(hostname, options, (error, address, family) => {
+      if (error) reject(error)
+      else resolve(options?.all ? address : { address, family })
+    })
+  })
   require('node:module').syncBuiltinESMExports()
 }

@@ -44,6 +44,7 @@ try {
         'android-plugin-policy.cjs'
     ) | ForEach-Object { Get-Item (Join-Path $runtimeDir $_) }
     $files += Get-ChildItem (Join-Path $runtimeDir 'node_modules') -Recurse -File
+    $files += Get-ChildItem (Join-Path $runtimeDir 'dsh-peer') -File
     foreach ($file in $files) {
         $relative = ($file.FullName.Substring($runtimeRoot.Length + 1)).Replace('\', '/')
         [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
