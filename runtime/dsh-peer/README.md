@@ -4,7 +4,11 @@ DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN �
 
 ## 安装
 
-需要 Node.js 22 或更新版本，已验证手机内核 `0.1.7-rc.2` 和桌面端 `0.2.0-rc.2`。DSHAN 的内置运行环境已集成插件。电脑端复制本目录到固定位置，在该目录执行 `npm ci --ignore-scripts`，通过 Harness 插件配置添加：
+需要 Node.js 22 或更新版本，已验证手机内核 `0.1.7-rc.2` 和桌面端 `0.2.0-rc.2`。DSHAN 的内置运行环境已集成插件。
+
+在 DSHAN 仓库根目录修改插件后，运行 `./scripts/sync-desktop-peer.ps1` 可自动同步到本机 DeepSeek Harness 插件目录（默认 `%USERPROFILE%\.dsh\plugins\dsh-peer`），并执行 `npm ci`。也可设置环境变量 `DSH_PEER_DESKTOP_PATH` 指向其他安装位置。
+
+电脑端也可手动复制本目录，执行 `npm ci --ignore-scripts`，通过 Harness 插件配置添加：
 
 ```yaml
 - id: dsh-peer
