@@ -20,6 +20,9 @@
       name: '__ANDROID_SETTINGS_PATH__'
     - id: dsh-peer
       name: '__PEER_PLUGIN_PATH__'
+      config:
+        signalingServer: ws://dshanp2p.chiyang001.top/peer
+        connectionMode: auto
     - id: preset-android
       name: '@deepseek-ai/dsh-agent-preset'
       config:

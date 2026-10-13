@@ -35,7 +35,7 @@ function harness(id, config = {}) {
     await ctx.route.handler({ method, authorized, headers: { host: 'localhost:3080', origin }, async *[Symbol.asyncIterator]() { yield JSON.stringify(input); } }, res);
     return res;
   };
-  return { agent, other, tools, events, pipeline, saved, call, request, disposeAgent: async () => { live = undefined; await events.get('agent/disposed')({ agent }); } };
+  return { agent, other, tools, events, pipeline, saved, call, request, addAgent: id => { live = { id }; return live; }, disposeAgent: async () => { live = undefined; await events.get('agent/disposed')?.({ agent }); } };
 }
 
 function shortCodeFromOutput(output) {
@@ -45,7 +45,7 @@ function shortCodeFromOutput(output) {
   return match[1];
 }
 
-test('plugin binds sharing to a live session, enforces allowlist and executes through local permission pipeline', { timeout: 30000 }, async t => {
+test('device sharing survives session deletion while enforcing allowlist and local permissions', { timeout: 30000 }, async t => {
   const server = createSignalServer({ port: 0 }); await once(server.http, 'listening');
   const url = `ws://127.0.0.1:${server.http.address().port}`;
   const phone = harness('phone', { signalingServer: url }), desktop = harness('desktop', { signalingServer: url });
@@ -63,7 +63,7 @@ test('plugin binds sharing to a live session, enforces allowlist and executes th
   }
   assert.equal(JSON.parse(await desktop.call('peer_status')).state, 'connected');
   assert.deepEqual(JSON.parse(await desktop.call('peer_tools')).map(tool => tool.name), ['screen', 'denied']);
-  await assert.rejects(desktop.call('peer_tools', {}, desktop.other), /another local session/);
+  assert.ok(JSON.parse(await desktop.call('peer_tools', {}, desktop.other)).some(tool => tool.name === 'screen'));
   await assert.rejects(desktop.call('peer_call', { name: 'hidden', arguments_json: '{}' }), /not shared/);
   assert.equal(phone.pipeline.length, 0);
   const result = await desktop.call('peer_call', { name: 'screen', arguments_json: '{}' });
@@ -73,7 +73,14 @@ test('plugin binds sharing to a live session, enforces allowlist and executes th
   const denied = await desktop.call('peer_call', { name: 'denied', arguments_json: '{}' });
   assert.equal(denied.isError, true); assert.match(denied.content[0].text, /permission denied/);
   await phone.disposeAgent();
-  assert.equal(JSON.parse(await phone.call('peer_status')).state, 'disconnected');
+  assert.equal(JSON.parse(await phone.call('peer_status')).state, 'connected');
+  assert.deepEqual(JSON.parse(await desktop.call('peer_tools')), []);
+  await assert.rejects(desktop.call('peer_call', { name: 'screen', arguments_json: '{}' }), /设备仍保持连接/);
+  const replacement = phone.addAgent('replacement');
+  const restored = await desktop.call('peer_call', { name: 'screen', arguments_json: '{}' }, desktop.other);
+  assert.equal(restored.isError, false);
+  assert.equal(phone.pipeline.at(-1).agent, replacement);
+  assert.equal(JSON.parse(await phone.call('peer_status')).state, 'connected');
 });
 
 test('settings pairing authenticates writes and preserves session allowlist and revocation', { timeout: 30000 }, async t => {
@@ -84,7 +91,7 @@ test('settings pairing authenticates writes and preserves session allowlist and 
   assert.equal((await phone.request('GET', {}, undefined, false)).status, 401);
   assert.equal((await phone.request('POST', { action: 'disconnect' }, 'https://other.example')).status, 403);
   const snapshot = JSON.parse((await phone.request()).body);
-  assert.deepEqual(snapshot.sessions[0].tools.map(tool => tool.name), ['screen', 'denied']);
+  assert.deepEqual(snapshot.availableTools, ['screen', 'denied']);
   const hosted = await desktop.call('peer_host', { server: url, tools: 'screen', connection_mode: 'relay' });
   const code = shortCodeFromOutput(hosted);
   assert.equal((await phone.request('POST', { action: 'join', code: 'bad', tools: '', sessionId: phone.agent.id })).status, 400);
@@ -97,5 +104,28 @@ test('settings pairing authenticates writes and preserves session allowlist and 
   const denied = await desktop.call('peer_call', { name: 'denied', arguments_json: '{}' });
   assert.equal(denied.isError, true);
   assert.equal((await phone.request('POST', { action: 'disconnect' })).status, 200);
-  assert.equal(JSON.parse((await phone.request()).body).sessionId, null);
+  assert.equal(JSON.parse((await phone.request()).body).scope, 'device');
+});
+
+
+test('devices pair with no sessions and restore tools without reconnecting', { timeout: 30000 }, async t => {
+  const server = createSignalServer({ port: 0 }); await once(server.http, 'listening');
+  const url = `ws://127.0.0.1:${server.http.address().port}`;
+  const phone = harness('idle-phone', { signalingServer: url }), desktop = harness('idle-desktop', { signalingServer: url });
+  t.after(async () => { await phone.call('peer_disconnect'); await desktop.call('peer_disconnect'); await server.close(); });
+  await phone.disposeAgent(); await desktop.disposeAgent();
+  const hosted = JSON.parse((await desktop.request('POST', { action: 'host', connectionMode: 'relay' })).body);
+  assert.match(hosted.shortCode, SHORT_CODE_RE);
+  assert.equal((await phone.request('POST', { action: 'join', code: hosted.shortCode })).status, 200);
+  for (let i = 0; i < 100 && JSON.parse((await phone.request()).body).state !== 'connected'; i++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(JSON.parse((await phone.request()).body).state, 'connected');
+  assert.deepEqual(JSON.parse(await desktop.call('peer_tools')), []);
+  const replacement = phone.addAgent('new-phone-session');
+  assert.deepEqual(JSON.parse(await desktop.call('peer_tools')).map(tool => tool.name), ['screen', 'denied']);
+  const result = await desktop.call('peer_call', { name: 'screen', arguments_json: '{}' });
+  assert.equal(result.isError, false);
+  assert.equal(phone.pipeline.at(-1).agent, replacement);
+  await phone.disposeAgent();
+  assert.equal(JSON.parse((await phone.request()).body).state, 'connected');
+  assert.equal(JSON.parse((await desktop.request()).body).state, 'connected');
 });

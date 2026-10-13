@@ -20,7 +20,8 @@ window.__ModuleLoader__.load({
       }, [value])
       const boxStyle = {
         boxSizing: 'border-box',
-        width: 40,
+        width: '100%',
+        minWidth: 0,
         height: 48,
         textAlign: 'center',
         fontSize: 20,
@@ -30,7 +31,8 @@ window.__ModuleLoader__.load({
         border: '1px solid var(--dsw-alias-border-general, #ddd)',
         background: readOnly ? 'var(--dsw-alias-bg-module-platform, rgba(128,128,128,.08))' : 'var(--dsw-alias-bg-layer-2, #fff)',
         color: 'var(--dsw-alias-label-primary, #222)',
-        font: 'inherit',
+        fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+        padding: 0,
       }
       function commit(nextDigits) {
         onChange(nextDigits.join('').slice(0, CODE_LENGTH))
@@ -61,7 +63,7 @@ window.__ModuleLoader__.load({
         role: 'group',
         'aria-label': readOnly ? '配对码' : '输入配对码',
         onPaste: readOnly ? undefined : handlePaste,
-        style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 },
+        style: { display: 'grid', gridTemplateColumns: 'repeat(8, minmax(0, 1fr))', gap: 'clamp(3px, 1vw, 8px)', width: '100%', maxWidth: 376, marginTop: 16 },
       }, digits.map((digit, index) => h('input', {
         key: index,
         ref: node => { refs.current[index] = node },
@@ -97,7 +99,7 @@ window.__ModuleLoader__.load({
           const response = await fetch('/peer/settings')
           const data = await response.json()
           if (!response.ok) throw new Error(data.error || '无法读取连接状态')
-          if (mounted.current) setState(data)
+          if (mounted.current) setState(previous => ({ ...data, qrDataUrl: data.hosting && data.shortCode === previous?.shortCode ? data.qrDataUrl || previous?.qrDataUrl : data.qrDataUrl }))
         } catch (readError) { if (mounted.current) setError(readError.message) }
         finally { inFlight.current = false }
       }, [])
@@ -116,9 +118,6 @@ window.__ModuleLoader__.load({
         window.addEventListener('dsh-peer-scan', scan)
         return () => { mounted.current = false; clearInterval(timer); window.removeEventListener('dsh-peer-scan', scan) }
       }, [read])
-      const sessions = state?.sessions || []
-      const session = sessions.at(-1) || null
-      const sharedTools = session?.tools?.map(tool => tool.name).join(',') || ''
       const active = state && !['disconnected', 'closed', 'error', 'failed'].includes(state.state)
       const connected = state?.state === 'connected'
       async function post(action, fields = {}) {
@@ -140,34 +139,50 @@ window.__ModuleLoader__.load({
         finally { if (mounted.current) setBusy(false) }
       }
       React.useEffect(() => {
-        if (!CODE_RE.test(code) || active || connected || busy || !session) return
+        if (!CODE_RE.test(code) || active || connected || busy) return
         if (joinAttempted.current === code) return
         joinAttempted.current = code
-        post('join', { code, sessionId: session.id, tools: sharedTools, allowHttp: true })
-      }, [code, active, connected, busy, session, sharedTools])
-      const text = (title, description) => h('div', null, h('div', { className: 'Pt1bsG_title' }, title), h('div', { className: 'Pt1bsG_description' }, description))
-      const row = (title, description, control) => h('div', { className: 'Pt1bsG_row' }, text(title, description), control)
+        post('join', { code, allowHttp: true })
+      }, [code, active, connected, busy])
+      const text = (title, description) => h('div', { style: { minWidth: 0, flex: 1 } }, h('div', { className: 'Pt1bsG_title' }, title), h('div', { className: 'Pt1bsG_description' }, description))
+      const row = (title, description, control) => h('div', { className: 'Pt1bsG_row', style: { display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', padding: '16px 0' } }, text(title, description), control)
       const names = { android_status: '设备状态', android_screenshot: '截图', android_screen: '读取屏幕内容', android_tap: '点击屏幕', android_swipe: '滑动屏幕', android_text: '输入文字', android_key: '按键', android_launch_app: '打开应用', android_shell: '执行 shell 命令（高级）', android_displays: '查看显示屏', android_virtual_display: '管理虚拟副屏', android_select_display: '选择显示屏', android_ui: '读取界面结构', android_tap_element: '点击界面元素', android_tap_cell: '按网格点击', android_scroll: '滚动页面', android_find_files: '查找手机文件', android_search_text: '搜索手机文件内容', read: '读取文件', write: '写入文件', edit: '编辑文件', glob: '查找文件', grep: '搜索文件内容', read_image: '查看图片' }
       const hosting = Boolean(state?.hosting && state?.shortCode)
       const isAndroid = Boolean(window.DSHAndroid?.scanPeerQr)
-      return h('div', null,
-        row('电脑连接', connected ? '已连接电脑，可在任意会话中调用对方共享的工具。' : active ? '正在连接电脑，请保持两端在线…' : hosting ? '等待手机输入配对码并连接…' : '在电脑端创建配对码，或在下方输入电脑显示的 8 位配对码。',
-          active && h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => post('disconnect') }, '断开连接')),
-        (error || state?.error) && h('div', { className: 'Pt1bsG_row', role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary, #d43b3b)', overflowWrap: 'anywhere' } }, error || state.error),
-        connected && row('连接方式', state.transport?.includes('relay') ? '加密中继连接' : 'P2P 直接连接', h('span', { className: 'Pt1bsG_description' }, '已加密')),
-        connected && row('连接会话', sessions.find(item => item.id === state.sessionId)?.label || '当前会话', null),
-        !active && !connected && h(React.Fragment, null,
-          row('创建配对', '在本机生成 8 位配对码，供手机扫码或输入后自动连接。全部工具默认可被对方调用。',
-            h(Button, { variant: 'outline', size: 'sm', disabled: busy || !session, onClick: () => post('host', { sessionId: session?.id, tools: sharedTools, allowHttp: true }) }, hosting ? '重新生成配对码' : '创建配对码')),
-          hosting && h('div', { className: 'Pt1bsG_row', style: { display: 'block' } }, text('本机配对码', '将此 8 位码展示给手机，或让对方扫描下方二维码。'),
-            h(CodeBoxes, { value: state.shortCode, readOnly: true, disabled: true }),
-            state.qrDataUrl && h('img', { src: state.qrDataUrl, alt: '配对二维码', style: { display: 'block', width: 220, marginTop: 12, borderRadius: 8 } })),
-          isAndroid && row('扫描二维码', '扫描电脑显示的配对二维码，识别后自动连接。', h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => window.DSHAndroid.scanPeerQr() }, '扫码配对')),
-          h('div', { className: 'Pt1bsG_row', style: { display: 'block' } }, text('输入配对码', '输入电脑显示的 8 位配对码，输满后自动连接。'),
+      const canPair = !active && !connected
+      const remote = isAndroid ? '电脑' : '另一台设备'
+      const cardStyle = {
+        padding: '20px clamp(12px, 3vw, 24px)', borderRadius: 16,
+        border: '1px solid var(--dsw-alias-border-general, rgba(128,128,128,.2))',
+        background: 'var(--dsw-alias-bg-module-platform, rgba(128,128,128,.04))',
+        minWidth: 0,
+      }
+      const pairingCard = (title, description, ...children) => h('section', { style: cardStyle }, text(title, description), ...children)
+      const statusLabel = connected ? '已连接' : hosting ? '等待配对' : active ? '连接中' : '未连接'
+      return h('div', { style: { maxWidth: 880, width: '100%', minWidth: 0, display: 'grid', gap: 16 } },
+        h('section', { style: cardStyle },
+          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
+            h('div', { className: 'Pt1bsG_title', style: { fontSize: 18, fontWeight: 600 } }, isAndroid ? '连接电脑' : '设备配对'),
+            h('span', { role: 'status', style: { display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13 } },
+              h('span', { style: { width: 8, height: 8, borderRadius: '50%', background: connected ? '#22a06b' : active || hosting ? '#d59b32' : '#888' } }), statusLabel)),
+          row(isAndroid ? '手机与电脑互联' : '连接手机或其他电脑',
+            connected ? `已连接${remote}，可在会话中调用对方共享的工具。` : hosting ? '配对码已生成，等待另一台设备扫码或输入。' : active ? `正在连接${remote}，请保持两端在线…` : isAndroid ? '扫描电脑上的二维码，或输入电脑生成的 8 位配对码。' : '在此生成配对码，让手机扫码连接；也可以输入另一台设备的配对码。',
+            (active || hosting) && h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => post('disconnect') }, connected ? '断开连接' : '取消配对')),
+          connected && row('连接方式', state.transport?.includes('relay') ? '加密中继连接' : 'P2P 直接连接', h('span', { className: 'Pt1bsG_description' }, '已加密'))),
+        (error || state?.error) && h('div', { role: 'alert', style: { ...cardStyle, color: 'var(--dsw-alias-state-error-primary, #d43b3b)', overflowWrap: 'anywhere' } }, error || state.error),
+        (canPair || hosting && !connected) && h('div', { style: { display: 'grid', gap: 16 } },
+          pairingCard('创建配对', isAndroid ? '生成本机配对码，供电脑或其他设备输入。' : '生成配对码后，在手机的「设置 → 连接」中扫码或输入。',
+            h('div', { style: { marginTop: 16 } }, h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => post('host', { allowHttp: true }) }, hosting ? '重新生成配对码' : '创建配对码')),
+            hosting && h(React.Fragment, null,
+              h(CodeBoxes, { value: state.shortCode, readOnly: true }),
+              state.qrDataUrl && h('img', { src: state.qrDataUrl, alt: '配对二维码', style: { display: 'block', width: 200, maxWidth: '100%', height: 'auto', marginTop: 20, borderRadius: 12, border: '1px solid var(--dsw-alias-border-general, #ddd)' } }),
+              h('div', { className: 'Pt1bsG_description', style: { marginTop: 12 } }, '将配对码或二维码展示给另一台设备。'))),
+          canPair && pairingCard('输入配对码', `输入${remote}显示的 8 位配对码，输满后自动连接，也支持粘贴完整配对码。`,
             h(CodeBoxes, { value: code, disabled: busy, autoFocus: !isAndroid, onChange: setCode }),
-            busy && h('div', { className: 'Pt1bsG_description', role: 'status', style: { marginTop: 8 } }, '正在连接…')),
-          !session && h('div', { className: 'Pt1bsG_row', role: 'status', style: { color: 'var(--dsw-alias-state-error-primary, #d43b3b)' } }, '请先打开一个会话')),
-        connected && row('已共享的工具', state.sharedTools?.map(name => names[name] || name).join('、') || '全部可用工具', null))
+            isAndroid && h('div', { style: { marginTop: 16 } }, h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => window.DSHAndroid.scanPeerQr() }, '扫描电脑二维码')),
+            busy && h('div', { className: 'Pt1bsG_description', role: 'status', style: { marginTop: 12 } }, '正在连接…')),
+          h('div', { className: 'Pt1bsG_description', style: { padding: '0 4px' } }, '设备连接独立于会话，删除会话不会断开。可用工具默认共享，调用仍需通过本机权限检查。')),
+        connected && pairingCard('已共享的工具', state.sharedTools?.map(name => names[name] || name).join('、') || '当前暂无可用工具；打开启用了工具的会话后自动恢复。'))
     }
     return {
       inject: ['slots'],

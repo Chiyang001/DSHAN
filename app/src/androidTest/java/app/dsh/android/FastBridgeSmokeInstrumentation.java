@@ -22,6 +22,7 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
     private boolean captureOnly;
     private boolean shizukuLifecycleCheck;
     private boolean peerQrCheck;
+    private boolean peerRegistrationCheck;
     private int peerLivePort;
     private int launchDisplay = -1;
     private int unicodeDisplay;
@@ -36,6 +37,7 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
         adbStreamCheck = arguments != null && "true".equals(arguments.getString("adbStreamCheck"));
         captureOnly = arguments != null && "true".equals(arguments.getString("captureOnly"));
         shizukuLifecycleCheck = arguments != null && "true".equals(arguments.getString("shizukuLifecycleCheck"));
+        peerRegistrationCheck = arguments != null && "true".equals(arguments.getString("peerRegistrationCheck"));
         peerQrCheck = arguments != null && "true".equals(arguments.getString("peerQrCheck"));
         if (arguments != null && arguments.containsKey("peerLivePort")) peerLivePort = Integer.parseInt(arguments.getString("peerLivePort"));
         if (arguments != null && arguments.containsKey("launchDisplay")) launchDisplay = Integer.parseInt(arguments.getString("launchDisplay"));
@@ -81,6 +83,33 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
         } finally {
             runOnMainSync(() -> view[0].destroy());
         }
+    }
+
+    private void verifyPeerRegistration(Bundle report) throws Exception {
+        MainActivity activity = (MainActivity) startActivitySync(new Intent(getTargetContext(), MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        Field field = MainActivity.class.getDeclaredField("web"); field.setAccessible(true);
+        android.webkit.WebView web = (android.webkit.WebView) field.get(activity);
+        long deadline = System.currentTimeMillis() + 120000;
+        while (!"\"ready\"".equals(evaluate(web, "document.readyState === 'complete' && location.host === '127.0.0.1:3080' ? 'ready' : 'wait'"))) {
+            check(System.currentTimeMillis() < deadline, "Harness UI ready for pairing registration"); Thread.sleep(500);
+        }
+        evaluate(web, "window.__pairTest='running';(async()=>{let hosted=false;try{" +
+            "const request=async(body)=>{const r=await fetch('/peer/settings',body?{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}:undefined);const d=await r.json();if(!r.ok)throw Error(d.error||('HTTP '+r.status));return d};" +
+            "const state=await request();if(state.state==='connected'||state.hosting)throw Error('Existing pairing must be preserved');" +
+            "for(let i=0;i<5;i++){const d=await request({action:'host',tools:'',allowHttp:true});hosted=true;" +
+            "if(!/^[A-HJ-NP-Z2-9]{8}$/.test(d.shortCode)||!d.qrDataUrl)throw Error('Missing pairing code or QR');" +
+            "await new Promise(r=>setTimeout(r,1000));const check=await request();if(check.error||check.state==='closed')throw Error(check.error||'Signaling closed');" +
+            "await request({action:'disconnect'});hosted=false;}window.__pairTest='ok:5';" +
+            "}catch(e){window.__pairTest='error:'+e.message}finally{if(hosted)await fetch('/peer/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'disconnect'})});}})();'started'");
+        deadline = System.currentTimeMillis() + 100000;
+        String result;
+        do {
+            Thread.sleep(500);
+            result = evaluate(web, "window.__pairTest");
+            check(System.currentTimeMillis() < deadline, "Pairing registration test deadline");
+        } while ("\"running\"".equals(result));
+        check("\"ok:5\"".equals(result), "Actual phone pairing result: " + result);
+        report.putString("result", "PEER_REGISTRATION_OK: five consecutive real plugin registrations, QR and signaling verified; temporary sharing revoked");
     }
 
     private void verifyPeerQr(Bundle report) throws Exception {
@@ -134,6 +163,11 @@ public final class FastBridgeSmokeInstrumentation extends Instrumentation {
     @Override public void onStart() {
         Bundle report = new Bundle();
         try {
+            if (peerRegistrationCheck) {
+                verifyPeerRegistration(report);
+                finish(0, report);
+                return;
+            }
             if (peerQrCheck) {
                 verifyPeerQr(report);
                 finish(0, report);

@@ -1,5 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
+import http from 'node:http';
+import https from 'node:https';
 
 export const MAX_BYTES = 16 * 1024 * 1024;
 export const SHORT_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -58,27 +60,67 @@ export function decodePair(code, allowHttp = false) {
   return validatePairObject(JSON.parse(Buffer.from(code.slice(9), 'base64url').toString()), allowHttp);
 }
 
+async function pairingRequest(url, options, address) {
+  try {
+    if (!address) return await fetch(url, options);
+    if (!isIP(address)) throw new Error('Invalid signaling address');
+    return await new Promise((resolve, reject) => {
+      const target = new URL(url);
+      const request = (target.protocol === 'https:' ? https : http).request(target, {
+        method: options.method || 'GET',
+        headers: { ...options.headers, ...(options.body !== undefined ? { 'content-length': Buffer.byteLength(options.body) } : {}) },
+        signal: options.signal,
+        lookup: (_hostname, settings, callback) => {
+          const result = { address, family: isIP(address) };
+          if (settings.all) callback(null, [result]); else callback(null, result.address, result.family);
+        },
+      }, response => {
+        const chunks = [];
+        let size = 0;
+        response.on('data', chunk => {
+          size += chunk.length;
+          if (size > 65536) { response.destroy(new Error('Pairing response too large')); return; }
+          chunks.push(chunk);
+        });
+        response.on('error', reject);
+        response.on('end', () => resolve({
+          status: response.statusCode, ok: response.statusCode >= 200 && response.statusCode < 300,
+          json: async () => JSON.parse(Buffer.concat(chunks).toString('utf8')),
+        }));
+      });
+      request.on('error', reject);
+      request.setTimeout(15000, () => request.destroy(Object.assign(new Error('Connection timed out'), { code: 'ETIMEDOUT' })));
+      request.end(options.body);
+    });
+  } catch (error) {
+    const detail = error.cause || error;
+    const timedOut = options.signal?.reason?.name === 'TimeoutError' || error.name === 'TimeoutError' || ['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(detail.code);
+    const reason = timedOut ? '请求超时' : detail.code === 'ECONNRESET' ? '连接被重置' : error.name === 'AbortError' || detail.code === 'ABORT_ERR' ? '请求已取消' : detail.code || error.name;
+    throw new Error(`无法访问配对服务器 ${new URL(url).host}（${reason}），请检查网络和服务器入口。`, { cause: error });
+  }
+}
+
 export async function registerShortPair(pair, signal) {
   for (let attempt = 0; attempt < 8; attempt++) {
     const code = generateShortCode();
-    const response = await fetch(`${signalingHttpBase(pair.server)}/pair/${code}`, {
+    const response = await pairingRequest(`${signalingHttpBase(pair.server)}/pair/${code}`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(pair),
       signal,
-    });
+    }, pair.signalingAddress);
     if (response.status === 409) continue;
-    if (!response.ok) throw new Error('无法注册配对码');
+    if (!response.ok) throw new Error(`无法注册配对码（HTTP ${response.status}），请检查服务器配对接口与 FRP 转发配置。`);
     return code;
   }
   throw new Error('无法生成配对码，请稍后重试');
 }
 
-export async function lookupShortPair(code, signalingUrl, allowHttp = true, signal) {
+export async function lookupShortPair(code, signalingUrl, allowHttp = true, signal, signalingAddress) {
   const normalized = normalizeShortCode(code);
-  const response = await fetch(`${signalingHttpBase(signalingUrl)}/pair/${normalized}`, { signal });
+  const response = await pairingRequest(`${signalingHttpBase(signalingUrl)}/pair/${normalized}`, { signal }, signalingAddress);
   if (response.status === 404) throw new Error('配对码无效或已过期');
-  if (!response.ok) throw new Error('无法查询配对码');
+  if (!response.ok) throw new Error(`无法查询配对码（HTTP ${response.status}），请检查服务器配对接口。`);
   return validatePairObject(await response.json(), allowHttp);
 }
 
@@ -88,7 +130,7 @@ export async function resolvePair(code, options = {}) {
   const signal = options.signal;
   if (isShortCode(value)) {
     if (!options.signalingUrl) throw new Error('未配置配对服务器');
-    return lookupShortPair(value, options.signalingUrl, allowHttp, signal);
+    return lookupShortPair(value, options.signalingUrl, allowHttp, signal, options.signalingAddress);
   }
   if (value.startsWith('dsh-peer:')) return decodePair(value, allowHttp);
   throw new Error('配对码无效');

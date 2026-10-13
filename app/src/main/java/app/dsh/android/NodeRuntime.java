@@ -71,6 +71,7 @@ final class NodeRuntime {
                 for (String name : new String[] {"package.json", "index.js", "client.js", "kernel-updater.js", "kernel-worker.js"}) {
                     overlayAsset(context, "android-settings/" + name, new File(androidSettings, name));
                 }
+                ensurePeerClient(bundledRuntime);
                 overlayAsset(context, "android-tools.js", new File(runtime, "android-tools.js"));
                 overlayAsset(context, "android-loop-guard.js", new File(runtime, "android-loop-guard.js"));
                 overlayAsset(context, "android-fast-screen.js", new File(runtime, "android-fast-screen.js"));
@@ -272,6 +273,15 @@ final class NodeRuntime {
                 zip.closeEntry();
             }
         }
+    }
+
+    private static void ensurePeerClient(File runtime) throws Exception {
+        File peer = new File(runtime, "dsh-peer");
+        if (!peer.isDirectory()) throw new Exception("内置 dsh-peer 插件不存在");
+        File client = new File(peer, "client.js");
+        File settingsClient = new File(peer, "settings-client.js");
+        if (!client.isFile() && settingsClient.isFile())
+            java.nio.file.Files.copy(settingsClient.toPath(), client.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
     }
 
     private static void copyTree(File source, File destination) throws Exception {
