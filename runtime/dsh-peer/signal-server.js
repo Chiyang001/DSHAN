@@ -1,11 +1,71 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
+import { SHORT_CODE_RE, SHORT_PAIR_TTL_MS } from './protocol.js';
 
-export function createSignalServer({ port = 8787, host = '127.0.0.1', ttl = 10 * 60_000, maxRooms = 1000 } = {}) {
+function validatePair(pair) {
+  return pair && pair.v === 1 && /^[a-f0-9]{32}$/.test(pair.room) && /^[A-Za-z0-9_-]{43}$/.test(pair.secret)
+    && typeof pair.server === 'string' && pair.server.length <= 2048
+    && (pair.mode === undefined || ['auto', 'relay', 'p2p'].includes(pair.mode));
+}
+
+export function createSignalServer({ port = 8787, host = '127.0.0.1', ttl = 10 * 60_000, maxRooms = 1000, shortPairTtl = SHORT_PAIR_TTL_MS } = {}) {
   const rooms = new Map();
-  const http = createServer((req, res) => { res.writeHead(req.url === '/health' ? 200 : 404,
-    { 'X-DSH-Peer-Relay': '1', 'Content-Type': 'text/plain; charset=utf-8' }); res.end(req.url === '/health' ? 'ok' : 'Not found'); });
+  const shortPairs = new Map();
+  const http = createServer((req, res) => {
+    const headers = { 'X-DSH-Peer-Relay': '1', 'Cache-Control': 'no-store' };
+    if (req.url === '/health') {
+      res.writeHead(200, { ...headers, 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('ok');
+      return;
+    }
+    const match = req.url?.match(/^\/pair\/([A-HJ-NP-Z2-9]{8})$/);
+    if (!match) {
+      res.writeHead(404, headers);
+      res.end('Not found');
+      return;
+    }
+    const code = match[1];
+    if (req.method === 'GET') {
+      const entry = shortPairs.get(code);
+      if (!entry || Date.now() >= entry.expires) {
+        res.writeHead(404, { ...headers, 'Content-Type': 'application/json; charset=utf-8' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(200, { ...headers, 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(entry.pair));
+      return;
+    }
+    if (req.method === 'PUT') {
+      const chunks = [];
+      req.on('data', chunk => {
+        chunks.push(chunk);
+        if (chunks.reduce((sum, item) => sum + item.length, 0) > 8192) req.destroy();
+      });
+      req.on('end', () => {
+        try {
+          const pair = JSON.parse(Buffer.concat(chunks).toString());
+          if (!validatePair(pair)) throw new Error('Invalid pair');
+          const existing = shortPairs.get(code);
+          if (existing && Date.now() < existing.expires) {
+            res.writeHead(409, headers);
+            res.end('{}');
+            return;
+          }
+          shortPairs.set(code, { pair, expires: Date.now() + shortPairTtl });
+          res.writeHead(204, headers);
+          res.end();
+        } catch {
+          res.writeHead(400, headers);
+          res.end('{}');
+        }
+      });
+      return;
+    }
+    res.writeHead(405, headers);
+    res.end('{}');
+  });
   const wss = new WebSocketServer({ server: http, maxPayload: 128 * 1024, perMessageDeflate: false });
   wss.on('connection', ws => {
     let room, role, count = 0;
@@ -59,10 +119,12 @@ export function createSignalServer({ port = 8787, host = '127.0.0.1', ttl = 10 *
     });
   });
   const timer = setInterval(() => {
-    for (const room of rooms.values()) if (!room.used && Date.now() >= room.expires) {
+    const now = Date.now();
+    for (const room of rooms.values()) if (!room.used && now >= room.expires) {
       for (const peer of Object.values(room.peers)) peer.close(1000, 'Pair expired');
       rooms.delete(room.id);
     }
+    for (const [code, entry] of shortPairs.entries()) if (now >= entry.expires) shortPairs.delete(code);
   }, 1000);
   timer.unref();
   const heartbeat = setInterval(() => {
@@ -73,7 +135,7 @@ export function createSignalServer({ port = 8787, host = '127.0.0.1', ttl = 10 *
   }, 30000);
   heartbeat.unref();
   http.listen(port, host);
-  return { http, rooms, async close() { clearInterval(timer); clearInterval(heartbeat); for (const ws of wss.clients) ws.terminate(); await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => http.close(resolve)); } };
+  return { http, rooms, shortPairs, async close() { clearInterval(timer); clearInterval(heartbeat); for (const ws of wss.clients) ws.terminate(); await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => http.close(resolve)); } };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const server = createSignalServer({ port: Number(process.env.PORT || 8787), host: process.env.HOST || '127.0.0.1' });

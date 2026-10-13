@@ -1,4 +1,4 @@
-# DSH Peer 0.1.3
+# DSH Peer 0.1.4
 
 DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN 和电脑 DSH 使用同一份 JavaScript 插件，优先通过 WebRTC 直连；连接未成功时，通过配对服务加密中继，调用对方明确共享的工具。没有额外安装桌面 ADB 的要求；手机操作仍走 DSHAN 本机的 ADB/Shizuku 桥接。
 
@@ -21,17 +21,24 @@ DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN �
 
 ## 配对与使用
 
-手机可以直接在 **设置 → 连接**（Android 设置右侧）配对。电脑调用 `peer_host` 后会显示二维码和完整配对码；手机点击“扫码配对”扫描，或粘贴配对码，选择已打开的会话以及允许电脑调用的手机工具，再点击“配对并连接”。首次扫描需允许相机权限。扫描只填入配对码，不会自动授权工具。若使用自行配置的 HTTP FRP 地址，需开启“允许 HTTP 配对服务”。连接成功后可查看连接方式和共享工具，点击“断开连接”撤销共享。
+手机可以直接在 **设置 → 连接** 配对。电脑在 **设置 → 连接** 点击“创建配对码”，或在会话中调用 `peer_host`；两端都会得到 **8 位配对码** 和二维码。手机扫码或逐位输入 8 位码后 **自动连接**，无需再点确认按钮。全部可用工具默认共享；HTTP 配对服务默认开启。连接成功后可查看连接方式和共享工具，点击“断开连接”撤销共享。
+
+插件配置可设置默认配对服务器：
+
+```yaml
+  config:
+    signalingServer: 'wss://your-domain/peer'
+```
 
 1. 两端各打开一个会话。手机选择 Android 模式，启用本机设备连接和控制权限。
-2. 在任一端要求创建配对，例如：“通过 `wss://pair.example.com` 创建配对，只共享 android_status、android_screenshot、android_tap、android_swipe、android_text、android_key。”会调用 `peer_host`，返回 `dsh-peer:` 开头的完整配对码。两分钟内复制给另一端。
-3. 在另一端要求使用该码连接，并明确提供该端要共享的工具名。`tools` 传空字符串表示该端不接受远端调用。配对码包含连接秘密，应只交给想要控制设备的另一端。
+2. 在电脑端 **设置 → 连接** 创建配对码，或要求模型调用 `peer_host`。会返回 8 位配对码和二维码，两分钟内有效。
+3. 手机在 **设置 → 连接** 扫码或输入 8 位码即可自动连接。`tools` 传空字符串表示该端不接受远端调用。
 4. `peer_status` 显示 connected 后，调用 `peer_tools` 获取对方工具及参数，再通过 `peer_call` 调用。电脑端拿到手机截图、snapshot_id 后，继续调用手机点击/滑动；手机端也可调用电脑端共享的文件、终端或其他 Harness 工具。
 5. `peer_disconnect` 立即断开并撤销共享。关闭共享会话或退出应用也会撤销。连接只属于创建它的本机会话，不会自动恢复或迁移到其他会话。
 
 手机端无需编辑配置文件，也可在创建/加入配对时给 `ice_servers_json` 参数传上述 STUN/TURN 设置的 JSON 数组。配置 STUN/TURN 可以增加 WebRTC 直连/中继的可用性；新版配对服务还提供加密 WebSocket 中继，因此没有 TURN 时仍可跨网络通信。
 
-已有 HTTP 类型 FRP 入口时，在 Windows 上运行 `deploy/start-frp.ps1 -FrpConfig '你的 frpc.ini 完整路径'`。脚本启动该配置的本地信令/加密中继服务及 frpc，并识别已运行的新版服务；默认读取 `DSHAN_P2P` 段，可用 `-Section` 更改。需要 Node.js 22 或更新版本，找不到 Node 时传 `-NodePath`。
+配对服务和 FRP 部署在独立的公网服务器，见项目 [Server 部署说明](../../Server/README.md)。普通用户电脑只安装本插件、使用服务器提供的 `wss://域名/peer`，无需运行 FRP 或配对服务。`deploy/start-frp.ps1` 仅保留为 Windows 服务器上的旧 Node 服务兼容入口；新版服务使用 `Server` 内的 Python/Flask。
 
 使用 `ws://域名`，两端的配对工具参数都传 `allow_http_signaling: true`。默认仍要求公网 WSS。HTTP 信令会暴露连接元数据，SDP 仍经过 HMAC 验证；直连数据使用 DTLS，中继数据使用 AES-256-GCM 端到端加密，服务器没有解密密钥。
 
@@ -49,11 +56,11 @@ DeepSeek Harness 的双向工具插件，开发者：炽阳001。手机 DSHAN �
 
 ## 跨网络服务部署
 
-本项目提供可自部署服务，没有预设公共服务器。部署需要一台 Linux 公网服务器、两个指向它的域名和可用 HTTPS 证书申请条件。
+正式服务位于项目根目录 `Server`，由 Python/Flask、服务器上的 frps/frpc 和 HTTPS 入口组成。部署需要一台公网服务器和指向该服务器的域名。按 [Server 部署说明](../../Server/README.md) 配置并启动后，两端插件使用 `wss://域名/peer`。服务器负责配对和加密转发；普通用户电脑不承担服务器职责。
 
-在 `deploy` 目录复制 `.env.example` 为 `.env`，填写真实域名、公网 IP 和强随机 TURN 密码，再执行 `docker compose up -d --build`。开放 TCP 80/443（HTTPS 信令）、TCP/UDP 3478（TURN）、UDP 49160–49200（中继）。TURN 示例要求服务器使用公网网卡；处于额外 NAT 后的服务器需要根据其网络调整 external-ip/listening-ip。`network_mode: host` 配置面向 Linux 服务器。
+`deploy` 目录原 Node/Caddy/coturn 示例作为兼容参考保留，新的独立服务以 `Server` 为准。需要 TURN 时可另外部署 coturn，在两端插件设置对应地址和凭据；缺少 TURN 时仍可通过服务器的加密 WebSocket 中继跨网络连接。
 
-配对地址为 `wss://你的信令域名`。检查 `https://你的信令域名/health` 返回 ok。数据优先通过 ICE 直连，必要时使用 TURN。可在插件配置设置 `relayOnly: true` 强制中继进行验收。TURN/TCP 帮助部分 UDP 受限网络，但本示例没有 TURN/TLS；只允许 HTTPS 出站的严格网络需要另外配置带证书的 TURN/TLS 监听及相应 `turns:` 地址。
+检查 `https://域名/health` 返回 `ok` 和 `X-DSH-Peer-Relay: 1`。数据优先通过 ICE 直连，失败时使用加密 WebSocket 中继。`connection_mode: relay` 可验收该服务；`relayOnly: true` 专指 TURN，不能替代 WebSocket 中继模式。
 
 当前 WebRTC 依赖只使用列表中的第一个 STUN 和第一个 TURN 地址，不会依次尝试多个 TURN 地址。示例选择 TURN/TCP；如需改成 UDP，请明确将该 URL 改为 `?transport=udp` 后重新配对。
 

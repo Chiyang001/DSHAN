@@ -52,6 +52,10 @@ public class MainActivity extends Activity {
     private FrameLayout root;
     private AnimatedBackgroundView ambientBackground;
     private WebView web;
+    private static final int PICK_UPLOAD = 7401;
+    private android.webkit.ValueCallback<Uri[]> uploadCallback;
+    private android.view.ActionMode selectionMode;
+    private String selectionScript;
     private SplashView splash;
     private FrameLayout wizardOverlay;
     private View currentScreen;
@@ -157,6 +161,11 @@ public class MainActivity extends Activity {
     }
 
     private void buildUi() {
+        try (java.io.InputStream input = getAssets().open("android-selection.js")) {
+            selectionScript = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (java.io.IOException error) {
+            android.util.Log.e("DSHWebView", "Cannot load selection helpers", error);
+        }
         root = new FrameLayout(this);
         setContentView(root);
 
@@ -164,6 +173,8 @@ public class MainActivity extends Activity {
         root.addView(ambientBackground, new FrameLayout.LayoutParams(-1, -1));
 
         web = new WebView(this);
+        WebView.setWebContentsDebuggingEnabled(
+            (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0);
         web.setBackgroundColor(Color.WHITE);
         android.webkit.WebSettings settings = web.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -184,7 +195,10 @@ public class MainActivity extends Activity {
                 pageGeneration++;
             }
             @Override public void onPageFinished(WebView view, String url) {
-                if (url.startsWith("http://127.0.0.1:3080/")) verifyKernelUi(0);
+                if (url.startsWith("http://127.0.0.1:3080/")) {
+                    if (selectionScript != null) view.evaluateJavascript(selectionScript, null);
+                    verifyKernelUi(0);
+                }
             }
             @Override public void onReceivedError(WebView view, android.webkit.WebResourceRequest request,
                     android.webkit.WebResourceError error) {
@@ -201,6 +215,23 @@ public class MainActivity extends Activity {
             }
         });
         web.setWebChromeClient(new android.webkit.WebChromeClient() {
+            @Override public boolean onShowFileChooser(WebView view,
+                    android.webkit.ValueCallback<Uri[]> callback, FileChooserParams params) {
+                if (uploadCallback != null) uploadCallback.onReceiveValue(null);
+                uploadCallback = callback;
+                try {
+                    Intent picker = params.createIntent();
+                    picker.addCategory(Intent.CATEGORY_OPENABLE);
+                    picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,
+                        params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
+                    startActivityForResult(picker, PICK_UPLOAD);
+                } catch (android.content.ActivityNotFoundException | SecurityException error) {
+                    uploadCallback = null;
+                    callback.onReceiveValue(null);
+                    android.widget.Toast.makeText(MainActivity.this, "无法打开文件选择器，请安装系统文件管理器", android.widget.Toast.LENGTH_LONG).show();
+                }
+                return true;
+            }
             @Override public boolean onConsoleMessage(android.webkit.ConsoleMessage message) {
                 android.util.Log.i("DSHWebView", message.message());
                 return true;
@@ -991,15 +1022,96 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == PICK_UPLOAD) {
+            android.webkit.ValueCallback<Uri[]> callback = uploadCallback;
+            uploadCallback = null;
+            if (callback != null) {
+                Uri[] selected = null;
+                if (resultCode == RESULT_OK && data != null) {
+                    android.content.ClipData items = data.getClipData();
+                    if (items != null) {
+                        selected = new Uri[items.getItemCount()];
+                        for (int i = 0; i < selected.length; i++) selected[i] = items.getItemAt(i).getUri();
+                    } else if (data.getData() != null) selected = new Uri[] { data.getData() };
+                }
+                callback.onReceiveValue(selected);
+            }
+            return;
+        }
         com.google.zxing.integration.android.IntentResult result = com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
         if (result != null) {
             String code = result.getContents();
-            String error = code != null && (!code.startsWith("dsh-peer:") || code.length() > 8192) ? "这不是 DSH 连接插件的配对二维码" : null;
+            String error = null;
+            if (code != null) {
+                String trimmed = code.trim();
+                if (trimmed.matches("^[A-HJ-NP-Z2-9]{8}$")) code = trimmed;
+                else if (trimmed.startsWith("dsh-peer:") && trimmed.length() <= 8192) code = trimmed;
+                else error = "这不是有效的配对二维码";
+            }
             String json = "{\"code\":" + (code == null || error != null ? "null" : org.json.JSONObject.quote(code)) + ",\"error\":" + (error == null ? "null" : org.json.JSONObject.quote(error)) + "}";
             web.evaluateJavascript("window.dispatchEvent(new CustomEvent('dsh-peer-scan',{detail:" + json + "}))", null);
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);
+    }
+
+    @Override public void onActionModeStarted(android.view.ActionMode mode) {
+        super.onActionModeStarted(mode);
+        selectionMode = mode;
+        if (web == null) return;
+        web.evaluateJavascript("window.DSHSelection ? window.DSHSelection.capture() : null", json -> {
+            if (selectionMode != mode || "null".equals(json)) return;
+            try {
+                String text = new org.json.JSONTokener(json).nextValue().toString();
+                if (text.trim().isEmpty()) return;
+                mode.getMenu().add("引用").setShowAsActionFlags(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM)
+                    .setOnMenuItemClickListener(item -> { appendQuote(text, ""); mode.finish(); return true; });
+                mode.getMenu().add("写注释").setShowAsActionFlags(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM)
+                    .setOnMenuItemClickListener(item -> {
+                        mode.finish();
+                        android.widget.EditText note = new android.widget.EditText(this);
+                        note.setHint("针对选中文字写下注释");
+                        note.setMinLines(3);
+                        note.setGravity(Gravity.TOP);
+                        android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
+                            .setTitle("写注释").setView(note).setNegativeButton("取消", null)
+                            .setPositiveButton("加入草稿", null).create();
+                        dialog.setOnShowListener(ignored -> dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)
+                            .setOnClickListener(button -> {
+                                String comment = note.getText().toString().trim();
+                                if (comment.isEmpty()) { note.setError("请输入注释"); return; }
+                                appendQuote(text, comment);
+                                dialog.dismiss();
+                            }));
+                        dialog.show();
+                        return true;
+                    });
+                mode.invalidate();
+            } catch (org.json.JSONException error) {
+                android.util.Log.w("DSHWebView", "Cannot read selected text", error);
+            }
+        });
+    }
+
+    @Override public void onActionModeFinished(android.view.ActionMode mode) {
+        if (selectionMode == mode) selectionMode = null;
+        super.onActionModeFinished(mode);
+    }
+
+    private void appendQuote(String text, String note) {
+        web.evaluateJavascript("window.DSHSelection && window.DSHSelection.append("
+            + org.json.JSONObject.quote(text) + "," + org.json.JSONObject.quote(note) + ")", result -> {
+                if (!"true".equals(result)) android.widget.Toast.makeText(this,
+                    "当前输入框不可用，请先打开可输入的会话后重试", android.widget.Toast.LENGTH_LONG).show();
+            });
+    }
+
+    @Override protected void onDestroy() {
+        if (uploadCallback != null) {
+            uploadCallback.onReceiveValue(null);
+            uploadCallback = null;
+        }
+        super.onDestroy();
     }
 
     @Override public void onBackPressed() {

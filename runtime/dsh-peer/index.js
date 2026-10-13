@@ -1,7 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { randomUUID } from 'node:crypto';
 import { Peer } from './peer.js';
-import { createPair, encodePair, decodePair } from './protocol.js';
+import { createPair, registerShortPair, resolvePair } from './protocol.js';
 import { androidHostAddresses } from './network.js';
 import { isIP } from 'node:net';
 import QRCode from 'qrcode';
@@ -9,12 +9,27 @@ import QRCode from 'qrcode';
 export const name = 'dsh-peer';
 export const inject = ['tools', 'agents'];
 
+function acceptSettingsWrite(req) {
+  const host = req.headers.host;
+  if (!host) return false;
+  if (req.headers['sec-fetch-site'] === 'cross-site') return false;
+  const origin = req.headers.origin;
+  if (origin === undefined || origin === 'null') return true;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
 export function apply(ctx, config = {}) {
-  let peer, owner, allowed = new Set(), executionQueue = Promise.resolve();
+  let peer, owner, allowed = new Set(), executionQueue = Promise.resolve(), hostingShortCode;
   const liveOwner = () => {
     if (!owner || ctx.agents.get(owner.id) !== owner) throw new Error('Shared session is closed. Enable sharing again in a live session.');
     return owner;
   };
+  const callableTools = agent => ctx.tools.schemas(agent).filter(tool => !tool.name.startsWith('peer_') && tool.name !== 'run_code' && ctx.tools.resolveExecution(tool.name, agent, false));
+  const toolNames = agent => callableTools(agent).map(tool => tool.name).join(',');
   const schemas = () => {
     const agent = liveOwner();
     return ctx.tools.schemas(agent).filter(schema => allowed.has(schema.name) && !schema.name.startsWith('peer_') && ctx.tools.resolveExecution(schema.name, agent, false));
@@ -43,7 +58,10 @@ export function apply(ctx, config = {}) {
     executionQueue = result.catch(() => {});
     return result;
   };
-  const stop = async () => { owner = undefined; allowed.clear(); const old = peer; peer = undefined; await old?.close(); };
+  const stop = async () => {
+    owner = undefined; allowed.clear(); hostingShortCode = undefined;
+    const old = peer; peer = undefined; await old?.close();
+  };
   ctx.on('dispose', stop);
   ctx.on('agent/disposed', ({ agent }) => { if (agent === owner) void stop(); });
   const textOutput = { schema: { type: 'string' }, render: (_args, result) => [{ type: 'text', text: result }] };
@@ -70,7 +88,34 @@ export function apply(ctx, config = {}) {
     await stop(); bindOwner(exec, tools);
     peer = new Peer({ pair, role, iceServers, hostAddresses, relayOnly: config.relayOnly === true, dispatch });
   };
-  const status = () => ({ ...(peer?.status() ?? { state: 'disconnected' }), sharedTools: [...allowed], sessionId: owner?.id ?? null });
+  const status = () => ({
+    ...(peer?.status() ?? { state: 'disconnected' }),
+    sharedTools: [...allowed],
+    sessionId: owner?.id ?? null,
+    hosting: Boolean(hostingShortCode),
+    shortCode: hostingShortCode ?? null,
+    signalingServer: config.signalingServer ?? null,
+  });
+  const resolveSignalingUrl = (input, pairServer) => input?.signalingUrl ?? config.signalingServer ?? pairServer ?? null;
+  const startHost = async (input, exec) => {
+    const agent = (input.sessionId ? ctx.agents.get(input.sessionId) : null) ?? exec?.agent ?? ctx.agents.list().at(-1);
+    if (!agent) throw new Error('请先打开一个会话');
+    const server = input.server ?? config.signalingServer;
+    if (!server) throw new Error('未配置配对服务器');
+    const pair = createPair(server, input.allowHttp !== false);
+    pair.mode = input.connectionMode ?? config.connectionMode ?? 'auto';
+    pair.signalingAddress = input.signalingAddress ?? config.signalingAddress;
+    if (pair.signalingAddress !== undefined && !isIP(pair.signalingAddress)) throw new Error('Invalid signaling address');
+    if (!['auto', 'relay', 'p2p'].includes(pair.mode)) throw new Error('Invalid connection mode');
+    const tools = typeof input.tools === 'string' ? input.tools : toolNames(agent);
+    const shortCode = await registerShortPair(pair, exec?.signal ?? AbortSignal.timeout(15000));
+    await connect(pair, 'host', { agent, signal: exec?.signal ?? AbortSignal.timeout(15000) }, tools, input.iceServersJson);
+    hostingShortCode = shortCode;
+    const qrBuffer = await QRCode.toBuffer(shortCode, { width: 640, margin: 4, errorCorrectionLevel: 'M' });
+    const store = ctx.get('attachments');
+    const qr = store ? await store.saveImage({ data: qrBuffer, mediaType: 'image/png', name: 'DSH-pairing-QR.png' }) : null;
+    return { shortCode, qr, qrDataUrl: 'data:image/png;base64,' + qrBuffer.toString('base64') };
+  };
   // The settings UI uses the same session ownership, allowlist and tool guards as model calls.
   ctx.inject(['webServer', 'connection'], scope => {
     scope.effect(() => scope.webServer.register({ kind: 'exact', path: '/peer/settings', async handler(req, res) {
@@ -79,22 +124,31 @@ export function apply(ctx, config = {}) {
       res.setHeader('content-type', 'application/json; charset=utf-8');
       try {
         if (req.method === 'POST') {
-          if (req.headers.origin !== `http://${req.headers.host}`) { res.writeHead(403); res.end(JSON.stringify({ error: '请求来源无效' })); return; }
+          if (!acceptSettingsWrite(req)) { res.writeHead(403); res.end(JSON.stringify({ error: '请求来源无效' })); return; }
           let body = '';
           for await (const chunk of req) { body += chunk; if (body.length > 16384) throw new Error('请求内容过长'); }
           const input = JSON.parse(body);
           if (input.action === 'disconnect') await stop();
+          else if (input.action === 'host') {
+            const hosted = await startHost(input);
+            res.end(JSON.stringify({ ...status(), ...hosted }));
+            return;
+          }
           else if (input.action === 'join') {
-            const agent = ctx.agents.get(input.sessionId);
-            if (!agent) throw new Error('请先打开一个会话，再选择该会话连接电脑');
-            if (typeof input.code !== 'string' || typeof input.tools !== 'string') throw new Error('配对信息无效');
-            await connect(decodePair(input.code.trim(), input.allowHttp === true), 'guest', { agent, signal: AbortSignal.timeout(15000) }, input.tools);
+            const agent = (input.sessionId ? ctx.agents.get(input.sessionId) : null) ?? ctx.agents.list().at(-1);
+            if (!agent) throw new Error('请先打开一个会话，再连接电脑');
+            if (typeof input.code !== 'string') throw new Error('配对信息无效');
+            const tools = typeof input.tools === 'string' ? input.tools : toolNames(agent);
+            const signalingUrl = resolveSignalingUrl(input);
+            if (!signalingUrl && !input.code.trim().startsWith('dsh-peer:')) throw new Error('未配置配对服务器');
+            const pair = await resolvePair(input.code.trim(), { signalingUrl, allowHttp: input.allowHttp !== false, signal: AbortSignal.timeout(15000) });
+            await connect(pair, 'guest', { agent, signal: AbortSignal.timeout(15000) }, tools);
           } else throw new Error('未知连接操作');
         } else if (req.method !== 'GET') { res.writeHead(405); res.end('{}'); return; }
         const sessions = ctx.agents.list().map((agent, index) => ({
           id: agent.id,
           label: agent.session?.deriveMessages?.().find(message => message.role === 'user')?.content?.find(block => block.type === 'text')?.text?.slice(0, 60) || `会话 ${index + 1}`,
-          tools: ctx.tools.schemas(agent).filter(tool => !tool.name.startsWith('peer_') && tool.name !== 'run_code' && ctx.tools.resolveExecution(tool.name, agent, false)).map(tool => ({ name: tool.name, description: tool.description })),
+          tools: callableTools(agent).map(tool => ({ name: tool.name, description: tool.description })),
         }));
         res.end(JSON.stringify({ ...status(), sessions }));
       } catch (error) { res.writeHead(400); res.end(JSON.stringify({ error: error.message })); }
@@ -107,24 +161,26 @@ export function apply(ctx, config = {}) {
     connection_mode: { type: 'string', enum: ['auto', 'relay', 'p2p'], description: 'Default auto: prefer P2P and fall back to encrypted FRP relay. relay forces encrypted relay; p2p disables fallback.' },
     signaling_address: { type: 'string', description: 'Optional actual FRP server IPv4/IPv6 address supplied by the user. Keeps domain Host/TLS verification while avoiding broken or VPN fake-IP DNS.' },
   }, async (args, exec) => {
-    const pair = createPair(args.server, args.allow_http_signaling === true);
-    pair.mode = args.connection_mode ?? config.connectionMode ?? 'auto';
-    pair.signalingAddress = args.signaling_address ?? config.signalingAddress;
-    if (pair.signalingAddress !== undefined && !isIP(pair.signalingAddress)) throw new Error('Invalid signaling address');
-    if (!['auto', 'relay', 'p2p'].includes(pair.mode)) throw new Error('Invalid connection mode');
-    await connect(pair, 'host', exec, args.tools, args.ice_servers_json);
-    const code = encodePair(pair);
-    const content = [{ type: 'text', text: 'Pairing code (expires in 2 minutes): ' + code + '\nOn DSHAN open Settings → 连接, scan this QR or paste the code.\nShared tools: ' + [...allowed].join(', ') }];
-    const store = ctx.get('attachments');
-    if (store) content.push({ type: 'image', attachment: await store.saveImage({ data: await QRCode.toBuffer(code, { width: 640, margin: 4, errorCorrectionLevel: 'M' }), mediaType: 'image/png', name: 'DSH-pairing-QR.png' }) });
+    const hosted = await startHost({
+      server: args.server,
+      tools: args.tools,
+      iceServersJson: args.ice_servers_json,
+      allowHttp: args.allow_http_signaling === true,
+      connectionMode: args.connection_mode ?? config.connectionMode ?? 'auto',
+      signalingAddress: args.signaling_address ?? config.signalingAddress,
+    }, exec);
+    const content = [{ type: 'text', text: 'Pairing code (expires in 2 minutes): ' + hosted.shortCode + '\nOn DSHAN open Settings → 连接, scan this QR or enter the 8-character code.\nShared tools: ' + [...allowed].join(', ') }];
+    if (hosted.qr) content.push({ type: 'image', attachment: hosted.qr });
     return { content };
   }, { schema: { type: 'object', additionalProperties: true }, render: (_args, result) => result.content });
   register('peer_join', 'Join another Harness using its private pairing code. Share only the specified local tools. Only run after the user requests pairing.', {
-    code: string('Complete dsh-peer: pairing code'), tools: string('Comma-separated local tool names to share; empty string disables incoming calls'),
+    code: string('Eight-character pairing code or legacy dsh-peer: code'), tools: string('Comma-separated local tool names to share; empty string disables incoming calls'),
     ice_servers_json: { type: 'string', description: 'Optional JSON array of STUN/TURN servers; configure on both ends for cross-network access' },
     allow_http_signaling: { type: 'boolean', description: 'Explicitly allow a user-configured HTTP FRP entrance; tool data remains encrypted' },
   }, async (args, exec) => {
-    await connect(decodePair(args.code.trim(), args.allow_http_signaling === true), 'guest', exec, args.tools, args.ice_servers_json);
+    const signalingUrl = resolveSignalingUrl({}, config.signalingServer);
+    const pair = await resolvePair(args.code.trim(), { signalingUrl, allowHttp: args.allow_http_signaling === true, signal: exec.signal });
+    await connect(pair, 'guest', exec, args.tools, args.ice_servers_json);
     return 'Connecting. Use peer_status before calling remote tools.';
   });
   register('peer_status', 'Show P2P connection status and tools shared by this device.', {}, async () => JSON.stringify(status()));

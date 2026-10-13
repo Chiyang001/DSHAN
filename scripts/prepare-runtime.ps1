@@ -6,6 +6,7 @@ $output = Join-Path $outputDir 'runtime.zip'
 if (-not (Test-Path (Join-Path $runtimeDir 'node_modules/@deepseek-ai/dsh/lib/bin.js'))) {
     throw '请先执行 npm ci --prefix runtime --omit=dev --ignore-scripts --os=android --cpu=arm64 --libc=bionic'
 }
+Copy-Item -LiteralPath (Join-Path $runtimeDir 'dsh-peer/settings-client.js') -Destination (Join-Path $runtimeDir 'dsh-peer/client.js') -Force
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 foreach ($name in @('android-host.js', 'android-tools.js', 'android-loop-guard.js', 'android-fast-screen.js',
     'android-coordinate-scale.js', 'android-ui-parse.js', 'android-screen-targets.js', 'android-screen-annotate.js', 'mobile-bootstrap.cjs',

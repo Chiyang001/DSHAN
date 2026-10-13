@@ -1,3 +1,5 @@
+# Legacy Windows SERVER launcher. End-user desktop PCs only need the peer plugin.
+# New deployments should use the independent Python/Flask service in Server/.
 param(
     [Parameter(Mandatory = $true)][string]$FrpConfig,
     [string]$Section = 'DSHAN_P2P',
@@ -53,4 +55,4 @@ $existingFrpc = Get-CimInstance Win32_Process -Filter "Name = 'frpc.exe'" | Wher
 if (-not $existingFrpc) {
     Start-Process -FilePath $frpcPath -ArgumentList @('-c', ('"' + $resolvedConfig + '"')) -WorkingDirectory $frpDirectory -WindowStyle Hidden | Out-Null
 }
-Write-Output 'DSH Peer 信令、加密中继和 FRP 已启动。保持电脑运行即可使用。'
+Write-Output '服务器上的 DSH Peer 服务和 FRP 已启动。普通用户电脑无需运行此脚本；新部署请使用 Server 文件夹。'

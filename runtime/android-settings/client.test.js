@@ -59,18 +59,13 @@ function mountPlugin(overrides = {}) {
   return { slots }
 }
 
-test('the plugin registers connection immediately after Android settings', () => {
+test('the plugin registers only Android settings sections', () => {
   const { slots } = mountPlugin()
   const names = slots.map(({ options }) => `${options.name}#${options.id}`)
   assert.deepEqual(names, [
     'settings.action#android-kernel-update',
     'settings.section#android',
-    'settings.section#connection',
   ])
-  const android = slots.find(slot => slot.options.id === 'android')
-  const connection = slots.find(slot => slot.options.id === 'connection')
-  assert.equal(connection.options.order, android.options.order + 1)
-  assert.equal(connection.options.label(), '连接')
 })
 
 test('the plugin asks for no service beyond slots', () => {
