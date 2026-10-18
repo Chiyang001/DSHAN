@@ -8,6 +8,14 @@ import QRCode from 'qrcode';
 
 export const name = 'dsh-peer';
 export const inject = ['tools', 'agents'];
+export const DEFAULT_SIGNALING_SERVER = 'ws://dshanp2p.chiyang001.top/peer';
+
+export function resolveSignalingServer(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return DEFAULT_SIGNALING_SERVER;
+}
 
 function acceptSettingsWrite(req) {
   const host = req.headers.host;
@@ -96,12 +104,11 @@ export function apply(ctx, config = {}) {
     scope: 'device',
     hosting: Boolean(hostingShortCode),
     shortCode: hostingShortCode ?? null,
-    signalingServer: config.signalingServer ?? null,
+    signalingServer: resolveSignalingServer(config.signalingServer),
   });
-  const resolveSignalingUrl = (input, pairServer) => input?.signalingUrl ?? config.signalingServer ?? pairServer ?? null;
+  const resolveSignalingUrl = (input, pairServer) => resolveSignalingServer(input?.signalingUrl, config.signalingServer, pairServer);
   const startHost = async (input, exec) => {
-    const server = input.server ?? config.signalingServer;
-    if (!server) throw new Error('未配置配对服务器');
+    const server = resolveSignalingServer(input.server, config.signalingServer);
     const pair = createPair(server, input.allowHttp !== false);
     pair.mode = input.connectionMode ?? config.connectionMode ?? 'auto';
     pair.signalingAddress = input.signalingAddress ?? config.signalingAddress;
@@ -148,7 +155,7 @@ export function apply(ctx, config = {}) {
     } }), 'Peer connection settings');
   });
   register('peer_host', 'Create a one-use P2P pairing code and share only the named local tools. Only run after the user requests pairing. Keep the code private; it grants remote access.', {
-    server: string('Signaling server wss:// URL (ws:// loopback allowed for tests)'), tools: string('Comma-separated local tool names to share; empty string disables incoming calls'),
+    server: { type: 'string', description: 'Optional signaling server URL; defaults to the configured server or the DSHAN pairing service' }, tools: string('Comma-separated local tool names to share; empty string disables incoming calls'),
     ice_servers_json: { type: 'string', description: 'Optional JSON array of STUN/TURN servers with urls, username and credential; otherwise uses plugin configuration' },
     allow_http_signaling: { type: 'boolean', description: 'Explicitly allow ws:// signaling for a user-configured HTTP FRP entrance. Signaling metadata is visible; tool data stays encrypted and peer descriptions stay authenticated.' },
     connection_mode: { type: 'string', enum: ['auto', 'relay', 'p2p'], description: 'Default auto: prefer P2P and fall back to encrypted FRP relay. relay forces encrypted relay; p2p disables fallback.' },

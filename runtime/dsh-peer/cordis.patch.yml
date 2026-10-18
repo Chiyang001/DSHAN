@@ -1,3 +1,6 @@
 - insert:
     - id: dsh-peer
       name: dsh-peer
+      config:
+        signalingServer: ws://dshanp2p.chiyang001.top/peer
+        connectionMode: auto

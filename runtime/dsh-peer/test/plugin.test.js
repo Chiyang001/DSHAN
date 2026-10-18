@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { apply } from '../index.js';
+import { apply, DEFAULT_SIGNALING_SERVER, resolveSignalingServer } from '../index.js';
 import { createSignalServer } from '../signal-server.js';
 import { SHORT_CODE_RE } from '../protocol.js';
 
@@ -128,4 +128,26 @@ test('devices pair with no sessions and restore tools without reconnecting', { t
   await phone.disposeAgent();
   assert.equal(JSON.parse((await phone.request()).body).state, 'connected');
   assert.equal(JSON.parse((await desktop.request()).body).state, 'connected');
+});
+
+
+test('missing and blank profile settings use a consistent default pairing server', async () => {
+  for (const value of [undefined, null, '', '   ']) {
+    const device = harness('defaults', { signalingServer: value });
+    assert.equal(JSON.parse((await device.request()).body).signalingServer, DEFAULT_SIGNALING_SERVER);
+    assert.equal(resolveSignalingServer(value), DEFAULT_SIGNALING_SERVER);
+  }
+  assert.equal(resolveSignalingServer(' ', ' wss://custom.example/peer '), 'wss://custom.example/peer');
+  assert.equal(resolveSignalingServer('wss://override.example/peer', 'wss://custom.example/peer'), 'wss://override.example/peer');
+});
+
+test('blank host input retains the configured server and pairing works without sessions', async t => {
+  const server = createSignalServer({ port: 0 }); await once(server.http, 'listening');
+  const url = `ws://127.0.0.1:${server.http.address().port}`;
+  const device = harness('blank-server', { signalingServer: url });
+  t.after(async () => { await device.call('peer_disconnect'); await server.close(); });
+  await device.disposeAgent();
+  const result = await device.request('POST', { action: 'host', server: '  ', tools: '' });
+  assert.equal(result.status, 200);
+  assert.match(JSON.parse(result.body).shortCode, SHORT_CODE_RE);
 });
