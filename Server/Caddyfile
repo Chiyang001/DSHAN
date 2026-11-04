@@ -1,0 +1,6 @@
+{
+    email {$ACME_EMAIL}
+}
+{$DSH_DOMAIN} {
+    reverse_proxy frps:8080
+}

@@ -38,7 +38,7 @@ try {
   await mkdir(workerData.stage, { recursive: true })
   await writeFile(join(workerData.stage, 'package.json'), JSON.stringify({
     name: 'dsh-android-runtime', version: '0.1.0', private: true, type: 'module',
-    dependencies: { '@deepseek-ai/dsh': workerData.version, '@deepseek-ai/dsh-tools': workerData.version, '@img/sharp-wasm32': '^0.35.5', npm: '11.6.2' },
+    dependencies: { '@deepseek-ai/dsh': workerData.version, '@deepseek-ai/dsh-tools': workerData.version, '@img/sharp-wasm32': '^0.35.5', npm: '11.6.2', pnpm: '11.1.2' },
   }, null, 2))
   const arb = new ProgressArborist({
     path: workerData.stage, cache: workerData.cache, registry,

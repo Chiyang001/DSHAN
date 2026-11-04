@@ -57,7 +57,9 @@ test('device sharing survives session deletion while enforcing allowlist and loc
   assert.equal(output.content[1].type, 'image');
   assert.equal(phone.saved[0].data.subarray(1, 4).toString(), 'PNG');
   await desktop.call('peer_join', { code, tools: '' });
-  for (let i = 0; i < 100; i++) {
+  // Auto mode may need its 8-second relay fallback on busy or restricted hosts.
+  const connectionDeadline = Date.now() + 15000;
+  while (Date.now() < connectionDeadline) {
     if (JSON.parse(await desktop.call('peer_status')).state === 'connected') break;
     await new Promise(resolve => setTimeout(resolve, 50));
   }
@@ -132,13 +134,15 @@ test('devices pair with no sessions and restore tools without reconnecting', { t
 
 
 test('missing and blank profile settings use a consistent default pairing server', async () => {
-  for (const value of [undefined, null, '', '   ']) {
+  assert.equal(DEFAULT_SIGNALING_SERVER, 'wss://dshanp2p.chiyang001.top/peer');
+  for (const value of [undefined, null, '', '   ', 'ws://dshanp2p.chiyang001.top/peer', ' ws://dshanp2p.chiyang001.top/peer ']) {
     const device = harness('defaults', { signalingServer: value });
     assert.equal(JSON.parse((await device.request()).body).signalingServer, DEFAULT_SIGNALING_SERVER);
     assert.equal(resolveSignalingServer(value), DEFAULT_SIGNALING_SERVER);
   }
   assert.equal(resolveSignalingServer(' ', ' wss://custom.example/peer '), 'wss://custom.example/peer');
   assert.equal(resolveSignalingServer('wss://override.example/peer', 'wss://custom.example/peer'), 'wss://override.example/peer');
+  assert.equal(resolveSignalingServer('ws://custom.example/peer'), 'ws://custom.example/peer');
 });
 
 test('blank host input retains the configured server and pairing works without sessions', async t => {

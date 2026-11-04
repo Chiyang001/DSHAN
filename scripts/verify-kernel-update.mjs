@@ -1,10 +1,10 @@
 import { Worker } from 'node:worker_threads'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const version = process.argv[2] || '0.2.0-rc.2'
+const version = process.argv[2] || JSON.parse(await readFile(new URL('../runtime/package.json', import.meta.url), 'utf8')).dependencies['@deepseek-ai/dsh']
 const stage = resolve(root, 'build/kernel-update-validation', `${version}-${Date.now()}`)
 await mkdir(stage, { recursive: true })
 const worker = new Worker(new URL('../runtime/android-settings/kernel-worker.js', import.meta.url), {

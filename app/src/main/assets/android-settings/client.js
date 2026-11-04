@@ -11,14 +11,17 @@ window.__ModuleLoader__.load({
       const [state, setState] = React.useState(null)
       const [error, setError] = React.useState('')
       const [requesting, setRequesting] = React.useState(false)
+      const inFlight = React.useRef(false)
+      const revision = React.useRef(0)
       const active = React.useRef(true)
       const scroll = React.useRef(null)
       const phases = { idle: '尚未检查', checking: '检查最新版本', checked: '版本检查完成', resolve: '解析依赖', install: '下载、校验和安装', verify: '验证安装结果', ready: '安装完成，等待启用', restarting: '正在重启应用', complete: '更新已完成', cancelled: '已取消', failed: '操作失败' }
       const read = React.useCallback(async () => {
+        const startedRevision = revision.current
         const response = await fetch('/android/kernel-update')
         const data = await response.json()
         if (!response.ok) throw new Error(data.error || '读取更新状态失败')
-        if (active.current) setState(data)
+        if (active.current && !inFlight.current && startedRevision === revision.current) setState(data)
         return data
       }, [])
       React.useEffect(() => { active.current = true; return () => { active.current = false } }, [])
@@ -34,16 +37,19 @@ window.__ModuleLoader__.load({
         return () => { disposed = true; clearTimeout(timer) }
       }, [open, read])
       React.useEffect(() => { if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight }, [state?.logs?.length, state?.package])
-      async function action(action) {
+      async function action(action, fields = {}) {
+        if (inFlight.current) return
+        inFlight.current = true
+        revision.current++
         setRequesting(true)
         setError('')
         try {
-          const response = await fetch('/android/kernel-update', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action }) })
+          const response = await fetch('/android/kernel-update', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...fields }) })
           const data = await response.json()
           if (!response.ok) throw new Error(data.error || '更新操作失败')
           if (active.current) setState(data)
         } catch (error) { if (active.current) setError(error.message) }
-        finally { if (active.current) setRequesting(false) }
+        finally { revision.current++; inFlight.current = false; if (active.current) setRequesting(false) }
       }
       async function show() {
         setOpen(true)
@@ -54,9 +60,11 @@ window.__ModuleLoader__.load({
         } catch (error) { setError(error.message) }
       }
       const info = (label, value) => h('p', { style: { margin: '8px 0', overflowWrap: 'anywhere' } }, `${label}：${value || '—'}`)
+      const channel = state?.channel || 'latest'
+      const channelLocked = requesting || !state || state.busy || ['ready', 'restarting'].includes(state.phase)
       const controls = [
         h(Button, { key: 'close', variant: 'outline', size: 'sm', onClick: () => setOpen(false) }, '关闭'),
-        !state?.busy && state?.phase !== 'restarting' && h(Button, { key: 'check', variant: 'outline', size: 'sm', disabled: requesting, onClick: () => action('check') }, '重新检查'),
+        !state?.busy && !['ready', 'restarting'].includes(state?.phase) && h(Button, { key: 'check', variant: 'outline', size: 'sm', disabled: channelLocked, onClick: () => action('check', { channel }) }, '重新检查'),
         state?.available && state?.compatible && !state?.busy && !['ready', 'restarting'].includes(state?.phase) && h(Button, { key: 'install', variant: 'outline', size: 'sm', disabled: requesting, onClick: () => action('start') }, '下载并安装更新'),
         ['resolve', 'install', 'verify'].includes(state?.phase) && h(Button, { key: 'cancel', variant: 'outline', size: 'sm', disabled: requesting, onClick: () => action('cancel') }, '取消更新'),
         state?.phase === 'ready' && h(Button, { key: 'restart', variant: 'outline', size: 'sm', disabled: requesting, onClick: () => action('restart') }, '重启并启用'),
@@ -67,10 +75,13 @@ window.__ModuleLoader__.load({
           h('section', { role: 'dialog', 'aria-modal': true, 'aria-label': 'DSH 内核更新', onKeyDown: (event) => { if (event.key === 'Escape') { event.stopPropagation(); setOpen(false) } }, style: { boxSizing: 'border-box', width: 'min(640px, 100%)', maxHeight: '90dvh', display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: 20, borderRadius: 14, background: 'var(--dsw-alias-bg-layer-2, #fff)', color: 'var(--dsw-alias-label-primary, #222)', boxShadow: '0 12px 40px #0003' } },
             h('h2', { style: { margin: '0 0 14px', fontSize: 20 } }, 'DSH 内核更新'),
             h('div', { style: { minHeight: 0, overflowY: 'auto' } },
+            h('div', { role: 'group', 'aria-label': '更新通道', style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 } },
+              [['latest', '正式版'], ['alpha', 'Alpha 版']].map(([value, label]) => h(Button, { key: value, type: 'button', variant: 'outline', size: 'sm', 'aria-pressed': channel === value, style: channel === value ? { fontWeight: 600, boxShadow: 'inset 0 0 0 1px currentColor' } : undefined, disabled: channelLocked, onClick: () => action('check', { channel: value }) }, label))),
+            h('p', { className: 'Pt1bsG_description' }, channel === 'alpha' ? 'Alpha 版包含较早发布的新功能，可能存在不稳定问题。' : '正式版通道跟随官方 latest 标签发布。'),
             info('镜像站', 'https://registry.npmmirror.com'),
-            info('当前版本', state?.currentVersion), info('最新版本 (latest)', state?.latestVersion),
+            info('当前版本', state?.currentVersion), info(`最新版本 (${channel})`, state?.latestVersion),
             h('p', { role: 'status', 'aria-live': 'polite', style: { fontWeight: 600 } }, phases[state?.phase] || '读取更新状态…'),
-            state?.available === false && state?.phase === 'checked' && h('p', null, '当前内核已是镜像站最新版本，或比镜像站版本更新。'),
+            state?.available === false && state?.phase === 'checked' && h('p', null, '当前内核已是所选通道最新版本，或比该通道版本更新。'),
             state?.compatible === false && h('p', { role: 'alert' }, `新版本要求 Node ${state.engines}，当前内置 Node 不兼容，暂时无法更新。`),
             state?.busy && h('progress', { 'aria-label': '更新进行中', style: { width: '100%' } }),
             state?.package && info('当前依赖', state.package),

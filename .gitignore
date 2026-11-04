@@ -17,3 +17,6 @@ runtime/dump.yml
 *.apk
 build/
 .cursor/
+keystore.properties
+*.jks
+*.keystore

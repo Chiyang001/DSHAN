@@ -5,7 +5,6 @@ const unsupported = new Set([
   'dsh-office-to-pdf', 'dsh-tool-workspace-dependencies', 'dsh-tmux-context',
   'dsh-experimental-speech-to-text-sensevoice',
   'dsh-ptc-runtime-node', 'dsh-workflow-ptc', 'dsh-tool-workflow',
-  'dsh-plugin-manager', 'dsh-plugin-manager/tools', 'dsh-client-ui-plugin-manager',
 ])
 function normalizeEntry(entry, runtime = __dirname) {
   if (!entry || typeof entry !== 'object') return entry

@@ -34,7 +34,8 @@ for (const mode of ['relay', 'auto']) test(`${mode}: encrypted relay transfers b
   const controller = new AbortController();
   const slow = host.request('slow', {}, controller.signal); controller.abort();
   await assert.rejects(slow, /canceled/);
-  await guest.close(); await once(host.ws, 'close');
+  const closed = once(host.ws, 'close');
+  await guest.close(); await closed;
   assert.equal(host.state, 'closed');
   await assert.rejects(host.request('echo', {}), /not connected/);
 });

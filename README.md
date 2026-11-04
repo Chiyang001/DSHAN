@@ -66,9 +66,15 @@ Root 模式下，主屏点击、滑动、按键、截图和设备 shell 命令�
 > [!IMPORTANT]
 > 模型执行操作时，应用进程必须保持运行。首版尚无后台常驻服务，部分厂商系统会在离开应用后回收进程。关闭 Shizuku 服务或在系统应用设置中强制停止本应用，即可中断设备操作。
 
+## 安装 NPM 插件
+
+在插件管理中输入 npm 包名、公开 GitHub/GitLab/Bitbucket 仓库地址或 HTTPS `.tgz` 地址安装。公开仓库通过 HTTPS 读取引用和下载对应提交的归档，不需要手机预装 Git；支持分支、标签和固定提交，已有内核也会使用 APK 中的安装适配。
+
+安卓端会跳过安装/构建脚本，使用文件复制并降低下载并发，保留缓存和失败重试。优先选择发布了完整 JavaScript/Web 构建产物的插件；需要现场编译、桌面原生模块或私有 SSH 认证的插件仍可能无法运行。详见 [安装兼容性与验证记录](docs/android-npm-install-validation.md)。
+
 ## 内核更新
 
-在设置面板顶部点击 **检查更新**（位于“打开配置文件”左侧），通过 `https://registry.npmmirror.com` 查询 `@deepseek-ai/dsh` 的 `latest` 版本。
+在设置面板顶部点击 **检查更新**（位于“打开配置文件”左侧），在窗口中选择 **正式版**（官方 `latest` 标签）或 **Alpha 版**（官方 `alpha` 标签），通过 `https://registry.npmmirror.com` 查询对应版本。默认选择正式版，之后记住上次选择；切换通道会自动重新检查。Alpha 版可能存在不稳定问题；两种通道均只安装高于当前内核的版本，不自动降级。
 
 1. 点击 **下载并安装更新**，查看依赖解析、镜像请求、下载校验、解包安装和最终验证的实时日志，以及包处理数量与耗时。
 2. 等待安装完成；关闭窗口不会取消安装。
@@ -92,7 +98,7 @@ Root 模式下，主屏点击、滑动、按键、截图和设备 shell 命令�
 | Gradle | 8.13 |
 | JavaScript | Node / npm |
 
-构建脚本使用官方 npm 版本 `@deepseek-ai/dsh@0.1.7-rc.2`，以及 [nodejs-mobile](https://github.com/fogtape/nodejs-mobile) 的 Node 24 Android `libnode.so`。首次构建先运行下载脚本，它会校验运行时的 SHA-256。
+应用默认内置官方 npm 版本 `@deepseek-ai/dsh@0.2.1-rc.2`（2026-10-23 核对官方 `latest`），配套 `@deepseek-ai/dsh-tools` 使用同一版本，以及 [nodejs-mobile](https://github.com/fogtape/nodejs-mobile) 的 Node 24 Android `libnode.so`。首次构建先运行下载脚本，它会校验运行时的 SHA-256。
 
 ### 构建命令
 
@@ -107,6 +113,21 @@ npm ci --prefix runtime --omit=dev --ignore-scripts --os=android --cpu=arm64 --l
 ```
 
 生成的 APK 位于 `app/build/outputs/apk/debug/`。
+
+### 签名 Release APK
+
+在项目根目录创建本机专用的 `keystore.properties`（已被 Git 忽略），填写已有正式签名密钥的信息：
+
+```properties
+storeFile=C:/path/to/dshan-release.jks
+storePassword=your-store-password
+keyAlias=dshan
+keyPassword=your-key-password
+```
+
+运行 `./gradlew.bat :app:assembleRelease :app:lintRelease`，生成的签名安装包位于 `app/build/outputs/apk/release/app-release.apk`。未配置此文件时，Release 产物不带签名，不能直接分发安装。可用 `python scripts/verify-apk-pages.py app/build/outputs/apk/release/app-release.apk` 检查原生库的 16 KB 兼容性。
+
+密钥和密码文件应单独备份，不随 APK 分发或提交到仓库；后续更新须沿用同一密钥。正式签名与 Debug 签名不同，无法直接覆盖安装 Debug 版；卸载旧版前请备份所需应用数据。
 
 ## 适配与当前边界
 

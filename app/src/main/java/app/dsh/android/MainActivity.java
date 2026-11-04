@@ -83,14 +83,26 @@ public class MainActivity extends Activity {
     private int webAuthRetries;
     private volatile String harnessFailure;
     private volatile long harnessStartingAt;
+    private volatile boolean startupFailed;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        startForegroundService(new Intent(this, HarnessMonitorService.class));
         getWindow().setStatusBarColor(UiKit.BG);
         getWindow().setNavigationBarColor(UiKit.BG);
         setupComplete = getSharedPreferences(PREFS, 0).getBoolean("setup_complete", false);
-        buildUi();
+        try {
+            buildUi();
+        } catch (RuntimeException | LinkageError error) {
+            android.util.Log.e("DSHAndroid", "WebView initialization failed", error);
+            showStartupFailure("页面组件初始化失败，请在系统设置中启用或更新 Android System WebView，然后重试。", error);
+            return;
+        }
+        try {
+            startForegroundService(new Intent(this, HarnessMonitorService.class));
+        } catch (RuntimeException error) {
+            android.util.Log.w("DSHAndroid", "Background protection unavailable", error);
+            android.widget.Toast.makeText(this, "后台运行保护未能开启，切到后台后任务可能停止", android.widget.Toast.LENGTH_LONG).show();
+        }
         if (shizuku == null) shizuku = new ShizukuClient(this);
         shizuku.setStatus(message -> {
             setWizardStatus(message);
@@ -127,10 +139,12 @@ public class MainActivity extends Activity {
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        if (startupFailed) return;
         if (intent.getBooleanExtra("adbPair", false)) requestAdbPairing();
     }
 
     private void requestAdbPairing() {
+        if (startupFailed || isDestroyed()) return;
         getIntent().removeExtra("adbPair");
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                 != android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -145,7 +159,13 @@ public class MainActivity extends Activity {
             startActivity(settings);
             return;
         }
-        startForegroundService(new Intent(this, AdbPairingService.class).setAction(AdbPairingService.START));
+        try {
+            startForegroundService(new Intent(this, AdbPairingService.class).setAction(AdbPairingService.START));
+        } catch (RuntimeException error) {
+            android.util.Log.w("DSHAndroid", "Cannot start ADB pairing service", error);
+            android.widget.Toast.makeText(this, "系统未允许启动配对服务，请返回应用后重试，并检查后台运行权限", android.widget.Toast.LENGTH_LONG).show();
+            return;
+        }
         try { startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)); }
         catch (android.content.ActivityNotFoundException error) {
             android.widget.Toast.makeText(this, "请在系统设置中打开开发者选项 → 无线调试", android.widget.Toast.LENGTH_LONG).show();
@@ -162,7 +182,11 @@ public class MainActivity extends Activity {
 
     private void buildUi() {
         try (java.io.InputStream input = getAssets().open("android-selection.js")) {
-            selectionScript = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = input.read(buffer)) != -1) bytes.write(buffer, 0, count);
+            selectionScript = bytes.toString(StandardCharsets.UTF_8.name());
         } catch (java.io.IOException error) {
             android.util.Log.e("DSHWebView", "Cannot load selection helpers", error);
         }
@@ -191,6 +215,11 @@ public class MainActivity extends Activity {
             enqueueBrowserDownload(url, URLUtil.guessFileName(url, contentDisposition, mimeType));
         });
         web.setWebViewClient(new WebViewClient() {
+            @Override public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                android.util.Log.e("DSHWebView", "Renderer exited, crashed=" + detail.didCrash());
+                showStartupFailure("页面进程已退出，请重试。若反复出现，请更新 Android System WebView 并检查手机可用内存。", null);
+                return true;
+            }
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 pageGeneration++;
             }
@@ -210,7 +239,10 @@ public class MainActivity extends Activity {
             @Override public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest request) {
                 String url = request.getUrl().toString();
                 if (url.startsWith("http://127.0.0.1:3080/")) return false;
-                startActivity(new Intent(Intent.ACTION_VIEW, request.getUrl()));
+                try { startActivity(new Intent(Intent.ACTION_VIEW, request.getUrl())); }
+                catch (android.content.ActivityNotFoundException | SecurityException error) {
+                    android.widget.Toast.makeText(MainActivity.this, "没有可打开此链接的应用", android.widget.Toast.LENGTH_SHORT).show();
+                }
                 return true;
             }
         });
@@ -219,16 +251,11 @@ public class MainActivity extends Activity {
                     android.webkit.ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (uploadCallback != null) uploadCallback.onReceiveValue(null);
                 uploadCallback = callback;
-                try {
-                    Intent picker = params.createIntent();
-                    picker.addCategory(Intent.CATEGORY_OPENABLE);
-                    picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,
-                        params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
-                    startActivityForResult(picker, PICK_UPLOAD);
-                } catch (android.content.ActivityNotFoundException | SecurityException error) {
+                android.util.Log.i("DSHUpload", "File chooser requested, mode=" + params.getMode());
+                if (!openUploadPicker(params)) {
                     uploadCallback = null;
                     callback.onReceiveValue(null);
-                    android.widget.Toast.makeText(MainActivity.this, "无法打开文件选择器，请安装系统文件管理器", android.widget.Toast.LENGTH_LONG).show();
+                    android.widget.Toast.makeText(MainActivity.this, "无法打开文件选择器，请在系统设置中启用“文件”或“文档”应用后重试", android.widget.Toast.LENGTH_LONG).show();
                 }
                 return true;
             }
@@ -246,6 +273,90 @@ public class MainActivity extends Activity {
         splash.setVisibility(View.GONE);
 
         buildWizardOverlay();
+    }
+
+    private boolean openUploadPicker(android.webkit.WebChromeClient.FileChooserParams params) {
+        // Prefer the system documents UI over OEM GET_CONTENT/media routing.
+        // Do not preflight resolveActivity: package visibility can hide a valid picker.
+        boolean multiple = params.getMode() == android.webkit.WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE;
+        java.util.LinkedHashSet<String> types = new java.util.LinkedHashSet<>();
+        for (String accept : params.getAcceptTypes()) {
+            if (accept == null) continue;
+            for (String value : accept.split(",")) {
+                value = value.trim().toLowerCase(java.util.Locale.ROOT);
+                if (value.startsWith(".")) {
+                    value = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(value.substring(1));
+                    if (value == null) { types.add("*/*"); continue; }
+                }
+                if (value.matches("[a-z0-9!#$&^_.+*-]+/[a-z0-9!#$&^_.+*-]+")) types.add(value);
+            }
+        }
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                Intent picker;
+                if (attempt == 1) {
+                    picker = params.createIntent();
+                } else {
+                    picker = new Intent(attempt == 0 ? Intent.ACTION_OPEN_DOCUMENT : Intent.ACTION_GET_CONTENT);
+                    picker.setType(types.size() == 1 ? types.iterator().next() : "*/*");
+                    if (types.size() > 1 && !types.contains("*/*"))
+                        picker.putExtra(Intent.EXTRA_MIME_TYPES, types.toArray(new String[0]));
+                }
+                picker.addCategory(Intent.CATEGORY_OPENABLE);
+                picker.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
+                startActivityForResult(picker, PICK_UPLOAD);
+                android.util.Log.i("DSHUpload", "Started file chooser attempt=" + attempt);
+                return true;
+            } catch (android.content.ActivityNotFoundException | SecurityException | IllegalArgumentException error) {
+                android.util.Log.w("DSHUpload", "File chooser failed, attempt=" + attempt, error);
+            }
+        }
+        return false;
+    }
+
+    private void showStartupFailure(String message, Throwable error) {
+        startupFailed = true;
+        webReady = false;
+        harnessPageLoading = false;
+        pageGeneration++;
+        ui.removeCallbacksAndMessages(null);
+        if (uploadCallback != null) {
+            uploadCallback.onReceiveValue(null);
+            uploadCallback = null;
+        }
+        WebView failed = web;
+        web = null;
+        if (failed != null) {
+            if (failed.getParent() instanceof android.view.ViewGroup)
+                ((android.view.ViewGroup) failed.getParent()).removeView(failed);
+            try { failed.destroy(); }
+            catch (RuntimeException | LinkageError ignored) { }
+        }
+        // This screen must work even when the WebView provider cannot load.
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setGravity(Gravity.CENTER);
+        content.setPadding(dp(24), dp(24), dp(24), dp(24));
+        content.setBackgroundColor(Color.WHITE);
+        TextView text = new TextView(this);
+        text.setText(message + (error == null ? "" : "\n\n" + error.getClass().getSimpleName() + ": " + error.getMessage()));
+        text.setTextColor(Color.DKGRAY);
+        content.addView(text, new LinearLayout.LayoutParams(-1, -2));
+        Button retry = new Button(this);
+        retry.setText("重试");
+        retry.setOnClickListener(view -> recreate());
+        content.addView(retry);
+        Button settings = new Button(this);
+        settings.setText("打开系统设置");
+        settings.setOnClickListener(view -> {
+            try { startActivity(new Intent(Settings.ACTION_SETTINGS)); }
+            catch (android.content.ActivityNotFoundException | SecurityException unavailable) {
+                android.widget.Toast.makeText(this, "请手动打开系统设置", android.widget.Toast.LENGTH_SHORT).show();
+            }
+        });
+        content.addView(settings);
+        setContentView(content);
     }
 
     private FrameLayout fullScreenOverlay() {
@@ -458,6 +569,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        if (startupFailed) return;
         if (shizuku != null) shizuku.refresh();
         HarnessMonitorService.visibility(false);
         if (wizardOverlay != null && wizardOverlay.getVisibility() == View.VISIBLE
@@ -745,10 +857,12 @@ public class MainActivity extends Activity {
 
     /** Let WebView follow the one-time token redirect and store the session cookie. */
     private void loadHarnessLaunchUrl(String launchUrl) {
+        if (startupFailed || isDestroyed()) return;
         web.loadUrl(launchUrl);
     }
 
     private void loadHarnessPage(String setCookie) {
+        if (startupFailed || isDestroyed()) return;
         applyAuthCookie(setCookie);
         Map<String, String> headers = new HashMap<>();
         headers.put("Cookie", harnessAuthCookie);
@@ -775,6 +889,7 @@ public class MainActivity extends Activity {
     }
 
     private void onHarnessUiReady() {
+        if (startupFailed || isDestroyed()) return;
         if (webReady) return;
         webReady = true;
         harnessFailure = null;
@@ -787,6 +902,7 @@ public class MainActivity extends Activity {
     }
 
     private void pollWeb() {
+        if (startupFailed || isDestroyed()) return;
         worker.execute(() -> {
             try {
                 File urlFile = new File(getNoBackupFilesDir(), "dsh-web-url");
@@ -802,6 +918,7 @@ public class MainActivity extends Activity {
                 if (code >= 200 && code < 500) {
                     pendingLaunchUrl = launchUrl;
                     ui.post(() -> {
+                        if (startupFailed || isDestroyed()) return;
                         // A slow WebView must be allowed to finish loading its JS bundle.
                         // Reloading the token URL on every poll aborts that initialization.
                         if (!webReady && !harnessPageLoading) {
@@ -844,6 +961,7 @@ public class MainActivity extends Activity {
 
     private void setWizardStatus(String message) {
         ui.post(() -> {
+            if (startupFailed || isDestroyed()) return;
             if (wizardStatus != null && wizardOverlay.getVisibility() == View.VISIBLE && wizardStep == 1)
                 wizardStatus.setText(adb != null && adb.isConnected() ? "无线 ADB 已连接" : message);
             refreshWizardButtons();
@@ -853,6 +971,7 @@ public class MainActivity extends Activity {
 
     private void setSplashStatus(String message) {
         ui.post(() -> {
+            if (startupFailed || isDestroyed()) return;
             if (splash != null && message != null && !message.isEmpty()) splash.setStatus(message);
         });
     }
@@ -901,7 +1020,7 @@ public class MainActivity extends Activity {
     }
 
     private void verifyKernelUi(int attempt, int generation) {
-        if (webReady || generation != pageGeneration) return;
+        if (startupFailed || isDestroyed() || webReady || generation != pageGeneration) return;
         web.evaluateJavascript(
             "(function(){var text=document.body?(document.body.innerText||''):'';" +
             "if(text.indexOf('authentication required')>=0)return 'auth';" +
@@ -909,7 +1028,7 @@ public class MainActivity extends Activity {
             "if(main&&main.getBoundingClientRect().height>0)return 'ok';" +
             "return 'wait';})()",
             result -> {
-                if (webReady || generation != pageGeneration) return;
+                if (startupFailed || isDestroyed() || webReady || generation != pageGeneration) return;
                 if ("\"auth\"".equals(result)) {
                     retryHarnessAuth();
                     return;
@@ -926,6 +1045,7 @@ public class MainActivity extends Activity {
     }
 
     private void captureLayoutDiagnostics(String runId) {
+        if (startupFailed || isDestroyed()) return;
         web.evaluateJavascript(
             "(function(){var frame=document.querySelector('.pI_x6G_frame');" +
             "var center=frame?frame.querySelector('.pI_x6G_centerCol'):null;" +
@@ -1023,6 +1143,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == PICK_UPLOAD) {
+            android.util.Log.i("DSHUpload", "File chooser returned, result=" + resultCode);
             android.webkit.ValueCallback<Uri[]> callback = uploadCallback;
             uploadCallback = null;
             if (callback != null) {
@@ -1049,7 +1170,8 @@ public class MainActivity extends Activity {
                 else error = "这不是有效的配对二维码";
             }
             String json = "{\"code\":" + (code == null || error != null ? "null" : org.json.JSONObject.quote(code)) + ",\"error\":" + (error == null ? "null" : org.json.JSONObject.quote(error)) + "}";
-            web.evaluateJavascript("window.dispatchEvent(new CustomEvent('dsh-peer-scan',{detail:" + json + "}))", null);
+            if (!startupFailed && web != null)
+                web.evaluateJavascript("window.dispatchEvent(new CustomEvent('dsh-peer-scan',{detail:" + json + "}))", null);
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);
@@ -1107,6 +1229,8 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        startupFailed = true;
+        ui.removeCallbacksAndMessages(null);
         if (uploadCallback != null) {
             uploadCallback.onReceiveValue(null);
             uploadCallback = null;
@@ -1115,6 +1239,7 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
+        if (startupFailed) { super.onBackPressed(); return; }
         if (wizardOverlay.getVisibility() == View.VISIBLE) {
             if (wizardStep > 0) goWizardStep(wizardStep - 1);
             return;

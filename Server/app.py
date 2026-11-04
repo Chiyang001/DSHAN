@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import queue
+import secrets
 import re
 import threading
 import time
@@ -45,6 +46,9 @@ class Room:
     expires: float
     peers: dict = field(default_factory=dict)
     used: bool = False
+    resumes: dict = field(default_factory=dict)
+    nonces: dict = field(default_factory=dict)
+    revoked: bool = False
 
 
 class Hub:
@@ -95,6 +99,9 @@ class Hub:
             raise Rejected("Invalid join")
         with self.lock:
             now = self.clock()
+            for stale_id, stale in list(self.rooms.items()):
+                if not stale.peers and now >= stale.expires:
+                    del self.rooms[stale_id]
             while self.retired and next(iter(self.retired.values())) <= now:
                 self.retired.popitem(last=False)
             if room_id in self.retired:
@@ -105,21 +112,51 @@ class Hub:
                     raise Rejected("Room limit")
                 room = Room(access, now + self.ttl)
                 self.rooms[room_id] = room
-            if not hmac.compare_digest(room.access, access) or role in room.peers or room.used or now >= room.expires:
+            resume = message.get("resume")
+            if resume is not None and not hexadecimal(resume, 64):
+                raise Rejected("Invalid resume token")
+            if (not hmac.compare_digest(room.access, access) or room.revoked or now >= room.expires
+                    or (room.used and (not resume or not hmac.compare_digest(room.resumes.get(role, ""), resume)))):
                 raise Rejected("Pair unavailable")
+            nonce = message.get("nonce")
+            if nonce is not None and not hexadecimal(nonce, 32):
+                raise Rejected("Invalid nonce")
+            if role in room.peers:
+                # A network handover can reconnect before the old TCP path times
+                # out. Only the already-paired role's independent resume secret
+                # may replace it, and every replacement must use a fresh nonce.
+                if (not room.used or not resume or not nonce
+                        or not hmac.compare_digest(room.resumes.get(role, ""), resume)
+                        or hmac.compare_digest(room.nonces.get(role) or "", nonce)):
+                    raise Rejected("Pair unavailable")
+                replaced = list(room.peers.values())
+                room.peers = {}
+                room.expires = now + 24 * 60 * 60
+                for member in replaced:
+                    member.close(1012, "Authenticated network handover")
+            room.nonces[role] = nonce
             peer.room_id, peer.role = room_id, role
+            room.resumes.setdefault(role, resume)
             room.peers[role] = peer
             peer.send({"type": "waiting"})
             if len(room.peers) == 2:
                 room.used = True
+                room.expires = float("inf")
+                epoch = secrets.token_hex(16)
                 for member in room.peers.values():
-                    member.send({"type": "ready", "relay": True})
+                    member.send({"type": "ready", "relay": True, "epoch": epoch,
+                                 **({"nonces": dict(room.nonces)} if all(room.nonces.values()) else {})})
 
     def relay(self, peer, message):
         with self.lock:
             room = self.rooms.get(peer.room_id)
             if not room or room.peers.get(peer.role) is not peer:
                 raise Rejected("Pair unavailable")
+            if message.get("type") == "leave":
+                room.revoked = True
+                for member in room.peers.values():
+                    member.close(4001, "Sharing revoked")
+                return
             other = room.peers.get("guest" if peer.role == "host" else "host")
             if not other:
                 raise Rejected("Peer unavailable")
@@ -143,7 +180,7 @@ class Hub:
     def expired(self, peer):
         with self.lock:
             room = self.rooms.get(peer.room_id)
-            return not room or (not room.used and self.clock() >= room.expires)
+            return not room or self.clock() >= room.expires
 
     def leave(self, peer):
         with self.lock:
@@ -151,13 +188,19 @@ class Hub:
             room = self.rooms.get(peer.room_id)
             if not room or room.peers.get(peer.role) is not peer:
                 return
-            del self.rooms[peer.room_id]
-            self.retired[peer.room_id] = self.clock() + self.ttl
-            while len(self.retired) > self.max_rooms * 4:
-                self.retired.popitem(last=False)
             others = [member for member in room.peers.values() if member is not peer]
+            room.peers = {}
+            resumable = room.used and all(room.resumes.get(role) for role in ("host", "guest")) and not room.revoked
+            if resumable:
+                room.expires = self.clock() + 24 * 60 * 60
+            else:
+                del self.rooms[peer.room_id]
+                self.retired[peer.room_id] = self.clock() + self.ttl
+                while len(self.retired) > self.max_rooms * 4:
+                    self.retired.popitem(last=False)
         for member in others:
-            member.close(1000, "Peer left")
+            member.close(4001 if room.revoked else 1012, "Sharing revoked" if room.revoked else "Peer left")
+
 
 
 class Client:

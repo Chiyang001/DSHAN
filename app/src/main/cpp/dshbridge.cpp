@@ -29,6 +29,8 @@ Java_app_dsh_android_NodeRuntime_start(JNIEnv* env, jclass,
     setenv("DSH_ANDROID_FLOCK_LIBRARY", flockLibraryPath.c_str(), 1);
     std::string ptyLibraryPath = flockLibraryPath.substr(0, flockLibraryPath.find_last_of('/') + 1) + "libdshpty.so";
     setenv("DSH_ANDROID_PTY_LIBRARY", ptyLibraryPath.c_str(), 1);
+    std::string nodeExecutable = flockLibraryPath.substr(0, flockLibraryPath.find_last_of('/') + 1) + "libdshnode.so";
+    setenv("DSH_ANDROID_NODE", nodeExecutable.c_str(), 1);
     setenv("HOME", homePath.c_str(), 1);
     setenv("TMPDIR", cachePath.c_str(), 1);
     setenv("DSH_HOME", dshHomePath.c_str(), 1);

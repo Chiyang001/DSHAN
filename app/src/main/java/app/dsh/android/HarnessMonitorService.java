@@ -33,6 +33,7 @@ public class HarnessMonitorService extends Service {
     private boolean dismissed;
     private String latest = "等待任务";
     private int captureHideDepth;
+    private boolean foregroundReady;
     static void visibility(boolean hidden) {
         background = hidden;
         if (instance != null) instance.main.post(() -> { if (!hidden) instance.dismissed = false; instance.render(); });
@@ -85,9 +86,16 @@ public class HarnessMonitorService extends Service {
     @Override public void onCreate() {
         super.onCreate(); instance = this;
         windows = (WindowManager) getSystemService(WINDOW_SERVICE);
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        manager.createNotificationChannel(new NotificationChannel("harness", "DeepSeek 后台任务", NotificationManager.IMPORTANCE_LOW));
-        startForeground(18, notification("后台运行保护已开启"));
+        try {
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            manager.createNotificationChannel(new NotificationChannel("harness", "DeepSeek 后台任务", NotificationManager.IMPORTANCE_LOW));
+            startForeground(18, notification("后台运行保护已开启"));
+            foregroundReady = true;
+        } catch (RuntimeException error) {
+            android.util.Log.w("DSHAndroid", "Cannot promote background service", error);
+            Toast.makeText(this, "后台运行保护不可用，切到后台后任务可能停止", Toast.LENGTH_LONG).show();
+            stopSelf();
+        }
     }
     private Notification notification(String text) {
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
@@ -95,6 +103,7 @@ public class HarnessMonitorService extends Service {
             .setContentTitle("DSHAN").setContentText(text).setContentIntent(open).setOngoing(true).build();
     }
     private void render() {
+        if (!foregroundReady) return;
         String text = tasks.isEmpty() ? latest : tasks.values().stream().reduce((a,b) -> b).orElse(latest);
         getSystemService(NotificationManager.class).notify(18, notification(text));
         if (!background || dismissed || tasks.isEmpty() || !Settings.canDrawOverlays(this)) { removePanel(); return; }
@@ -169,6 +178,6 @@ public class HarnessMonitorService extends Service {
     }
     private void removePanel(){ if(panel!=null){ try{windows.removeView(panel);}catch(RuntimeException ignored){} panel=null; } }
     @Override public int onStartCommand(Intent intent,int flags,int id){render();return START_NOT_STICKY;}
-    @Override public void onDestroy(){removePanel();instance=null;super.onDestroy();}
+    @Override public void onDestroy(){foregroundReady=false;main.removeCallbacksAndMessages(null);removePanel();instance=null;super.onDestroy();}
     @Override public IBinder onBind(Intent intent){return null;}
 }

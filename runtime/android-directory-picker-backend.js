@@ -137,10 +137,19 @@ class AndroidBrowseDirectoryPicker extends BrowseDirectoryPicker {
   }
 
   async androidList(path, signal, baseList) {
+    path = normalizePath(path)
     if (path == null || path === '' || path === ROOTS || path === '/') return await this.listRoots(signal)
     if (isSharedStoragePath(path)) return anchorHome(await listStorageDirectory(path, signal), path)
     const listing = await baseList(path, signal)
     return anchorHome(listing, path)
+  }
+
+  async createDirectory(path, name) {
+    const normalized = normalizePath(path)
+    if (normalized == null || normalized === '' || normalized === ROOTS || normalized === '/') {
+      throw new DirectoryPickerError('directory-create-failed', path ?? ROOTS, '请先选择内部存储或应用数据中的文件夹，再新建文件夹')
+    }
+    return await super.createDirectory(normalized, name)
   }
 
   async listRoots(signal) {
@@ -156,7 +165,7 @@ class AndroidBrowseDirectoryPicker extends BrowseDirectoryPicker {
     return {
       path: ROOTS,
       home: ROOTS,
-      crumbs: [{ name: ROOTS, path: ROOTS, hidden: false }],
+      crumbs: [{ name: '存储位置', path: ROOTS, hidden: false }],
       entries,
       truncated: false,
     }

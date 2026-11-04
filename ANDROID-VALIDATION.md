@@ -1,5 +1,51 @@
 # Android 兼容性修复与验证
 
+## 2026-11-04 DSHAN 1.3.0 构建与源码同步
+
+- 应用版本为 `1.3.0` / versionCode `14`，包含正式版与 Alpha 内核更新通道及当前保留的 Android、P2P、配对服务端源码改动。
+- Node 回归 161 项全部通过，Python 服务端回归 15 项全部通过。修正两处旧测试的依赖接入方式：浏览器 Slots 使用测试夹具，真实 JSONL 持久化通过官方插件接口加载。Windows 回归使用隔离测试目录中的 Koffi 3.1.1，不改变 Android 运行依赖。
+- `:app:assembleDebug :app:assembleRelease :app:lintRelease` 成功，Lint 0 errors / 40 warnings；两个 APK 的版本元数据与更新通道资源均已核对。
+- Release APK v2 签名及 9 个 ARM64 原生库的 ELF/RELRO/ZIP 16 KB 检查通过；本次未安装到手机进行界面验证。
+
+## 2026-11-04 内核更新支持正式版与 Alpha 通道
+
+- “检查更新”窗口新增正式版（`latest`）和 Alpha 版（`alpha`）选择；切换立即检查并保存通道，旧更新记录默认使用正式版。Alpha 通道附有稳定性提示。
+- 切换前清空旧版本结果，检查失败不回退到其他通道；安装中和等待重启启用时禁止切换，迟到的状态轮询不会覆盖通道检查结果。保留禁止降级与 Node 兼容性检查。
+- `node --test runtime/android-settings/kernel-updater.test.js runtime/android-settings/index.test.js runtime/android-settings/client.test.js`：12 项通过，覆盖通道请求、持久化恢复、无效通道、检查失败、安装目标、界面选择及迟到轮询。
+- 两个镜像通道的真实查询均成功，返回版本与官方 npm 标签一致；未实际下载安装或执行手机端界面验证。`:app:assembleDebug` 构建成功。
+
+## 2026-10-23 默认内置官方内核升级至 0.2.1-rc.2
+
+- 同时向 npm 官方源和 npmmirror 核对 `@deepseek-ai/dsh` 的 `latest`，均为 `0.2.1-rc.2`。将内置默认值从 `0.1.7-rc.2` 升级到此版本，配套 `@deepseek-ai/dsh-tools` 同步固定为 `0.2.1-rc.2`，更新锁文件、安装依赖并重新生成 `runtime.zip`。
+- 保留 Android 适配及无需 Git 的插件安装器。校验 878 个已安装依赖与锁文件一致，非可选依赖支持 Android Node 24.21.0；sharp 和 WASM 均为 0.35.5，pnpm 保持 11.1.2。
+- 打包脚本先检查 DSH 和 tools 的实际安装版本与声明一致，避免只改清单而误打包旧内核。在线更新验证脚本默认使用清单中的内置版本；更新器测试使用模拟的未来版本，避免随内置版本升级而失效。
+- 73 项 Android/设置回归和 5 项 Peer 插件测试通过。官方 CLI `--version` 返回 `0.2.1-rc.2`，在隔离目录成功组合全新 Web profile 和全部 Android overlays。
+- `:app:assembleDebug :app:assembleRelease :app:lintRelease` 通过，Lint 0 errors / 41 warnings。逐层读取 Debug/Release APK 内的 `runtime.zip`，确认实际包含 DSH/tools 0.2.1-rc.2，且 Android 启动适配和插件安装器与源码一致。
+- Release APK v2 签名验证通过，9 个原生库的 ELF/RELRO/ZIP 16 KB 检查通过。当前 ADB 无连接设备，未完成新内置内核的手机冷启动、模型对话和设备操作验证。
+
+## 2026-10-18 签名 Release 测试包（1.2.5）
+
+- 版本 `1.2.5` / versionCode `8`，包名 `app.dsh.android`，Android 11+ / ARM64；包含本次 16 KB 与启动兼容性修复。Release 关闭 debuggable，不包含 Debug 专用测试 Activity。
+- 新建本机独立 RSA 3072 Release 密钥：`C:/Users/Administrator/.android/keystores/dshan-release.jks`；密码与别名读取项目根目录 `keystore.properties`。密码文件、JKS/keystore 文件已加入 Git 忽略。密钥和配置须单独备份，不能随 APK 分发；后续更新须使用相同密钥。
+- `gradlew.bat :app:assembleRelease :app:lintRelease` 成功；最终 APK 的 8 个原生库 ELF/RELRO 检查、SDK ZIP 16 KB 对齐与 APK v2 签名验证通过；实际 APK 元数据确认版本、ARM64 及非 debuggable。
+- 标准产物 `app/build/outputs/apk/release/app-release.apk`；分发副本 `app/build/outputs/apk/release/DSHAN-1.2.5-arm64-v8a-release.apk`，209153566 bytes，SHA-256 `4BFA43873FED8D91EFBB85C3B2FAC69DD4132221B4A2C6DCBCDDFA69726A5E22`。
+- Release 证书 SHA-256：`932e7f2f16e4db034aa45be002d93ee77348494d890f266dc2c3bcfd68ee1e5a`。签名不同于之前 Debug 包，不能覆盖安装 Debug 版；卸载前需备份所需应用数据。
+- 尚未完成小米真机安装及启动验证，本记录仅确认构建与离线检查。不能据此确认所有 MIUI/HyperOS 版本或所有 16 KB 设备均运行正常。
+
+## 2026-10-18 16 KB 原生库与启动异常
+
+- `dshbridge`、`dshflock`、`dshpty` 增加 `max-page-size=16384` 和 `common-page-size=16384` 链接选项，同时修复 LOAD 对齐和 RELRO 边界；保留 4 KB 设备兼容性。旧 APK 三个库均为 `0x1000` 对齐。
+- 扩大检查发现 Conscrypt 2.5.3 的 LOAD 虽为 16 KB 对齐，RELRO 向 16 KB 边界取整却会覆盖可写数据；升级至稳定版 2.7.0，最终 APK 中全部 8 个 ARM64 原生库通过检查。
+- 修复启动时读取 `android-selection.js` 使用 API 33 才提供的 `InputStream.readAllBytes()`，改用兼容 Android 11/12 的缓冲读取。Lint 的 NewApi 检查通过。此问题不属于小米专有限制。
+- WebView 创建/初始化异常显示原生错误页，提供重试和系统设置入口；接管渲染进程退出，清理失效 WebView，停止页面轮询及旧页面回调。外链无处理程序时提示错误。
+- 主界面启动前台服务及后台服务自身提升为前台失败时均捕获异常，停止失败的服务并提示；后台保护失败允许前台继续使用，配对失败允许用户重试。Node 库加载移到工作线程已有错误处理内，避免静态初始化失败导致类永久不可用。
+- `ShimmerTextView` 保留平台 TextView：应用及 Service 悬浮窗使用平台主题，局部标注不要求 AppCompat tint/theme 支持，未更换主题或新增运行依赖。
+- `gradlew.bat :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug` 成功；Lint 0 errors / 41 warnings，既有反射接口、资源和样式等警告仍存在。AndroidTest APK 仅构建，未执行设备测试。
+- 新增只读校验脚本 `python scripts/verify-apk-pages.py app/build/outputs/apk/debug/app-debug.apk`，检查打包后的 ARM64 ELF LOAD、RELRO 取整与可写段冲突、未压缩库 ZIP 对齐及必需库；8 个库通过。用临时保存的修改前原生库复查：三个 4 KB 库和旧版 Conscrypt 均被准确拒绝。
+- SDK `zipalign -c -P 16 4`、`apksigner verify --verbose` 通过。产物为 `app/build/outputs/apk/debug/app-debug.apk`，Android Debug 签名，224519057 bytes，SHA-256 `0306685E20F5E9364DA10E2583999133D93965C6AE0EB9E0656D10377BE2CD10`。
+- 当前 ADB 无连接设备，未验证小米/HyperOS 真机安装、Android 11/12 冷启动、16 KB 系统运行、WebView 故障恢复及前台服务被系统拒绝的实际行为。对齐和静态检查通过不等于完成上述设备验证。
+- 参考：[Android 16 KB 构建与验证](https://developer.android.com/guide/practices/page-sizes)、[WebView 渲染进程退出处理](https://developer.android.com/reference/android/webkit/WebViewClient#onRenderProcessGone(android.webkit.WebView,%20android.webkit.RenderProcessGoneDetail))、[Conscrypt 官方仓库](https://github.com/google/conscrypt)。
+
 ## 2026-10-11 虚拟副屏文字输入（1.2.4）
 
 - 修复副屏所有文字都强制进入 Unicode 输入法的问题。可通过键盘事件表示的可打印 ASCII 文字直接执行带明确 `-d displayId` 的输入命令；长文本不再因超过 128 字符而强制切换输入法。设备连接、控制授权、屏幕存在及旋转检查仍生效，副屏任意 shell 仍被禁用。

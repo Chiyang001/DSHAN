@@ -5,14 +5,24 @@ import { createPair, registerShortPair, resolvePair } from './protocol.js';
 import { androidHostAddresses } from './network.js';
 import { isIP } from 'node:net';
 import QRCode from 'qrcode';
+import { LinkedMessages } from './messages.js';
+import { installLinkedAccess, linkedDeviceContext } from './linked-access.js';
+import { installNativeMessages } from './native-messages.js';
+import { installLinkedWorkspace, installLinkedDeletion, installLinkedThemeActions } from './lifecycle.js';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 export const name = 'dsh-peer';
 export const inject = ['tools', 'agents'];
-export const DEFAULT_SIGNALING_SERVER = 'ws://dshanp2p.chiyang001.top/peer';
+export const DEFAULT_SIGNALING_SERVER = 'wss://dshanp2p.chiyang001.top/peer';
 
 export function resolveSignalingServer(...values) {
   for (const value of values) {
-    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'string' && value.trim()) {
+      const server = value.trim();
+      // Existing profiles may still contain the former public HTTP endpoint.
+      return server === 'ws://dshanp2p.chiyang001.top/peer' ? DEFAULT_SIGNALING_SERVER : server;
+    }
   }
   return DEFAULT_SIGNALING_SERVER;
 }
@@ -32,7 +42,43 @@ function acceptSettingsWrite(req) {
 
 export function apply(ctx, config = {}) {
   let peer, allowed = new Set(), shareAll = false, executionQueue = Promise.resolve(), hostingShortCode;
+  const linked = new LinkedMessages({
+    file: config.messageStore ?? join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'peer-messages', 'state.json'),
+    controller: () => ctx.get('sessionController'), peer: () => peer,
+    label: process.env.DSH_ANDROID_BRIDGE_TOKEN ? 'Android 手机' : '电脑',
+  });
+  const disposeAccess = installLinkedAccess(ctx, linked);
+  ctx.inject(['systemPrompt'], scope => {
+    const prompt = scope.get?.('systemPrompt') ?? ctx.get('systemPrompt');
+    if (!prompt?.context) return;
+    scope.effect(() => prompt.context({ name: 'dsh-peer:linked-device', order: 3500, text: ({ agent }) => linkedDeviceContext(linked, peer, agent) }), 'Linked device runtime context');
+  });
+  linked.uploads = () => ctx.get('fileUploads');
+  ctx.inject(['agents', 'sessionPersistence', 'workspaceRegistry', 'sessions'], scope => { if (!ctx.get('sessionPersistence')) return; const dispose = installLinkedDeletion(scope, linked); scope.on('dispose', dispose); });
+  ctx.inject(['workspaceController', 'workspaceRegistry'], scope => { if (!ctx.get('workspaceController')) return; const dispose = installLinkedWorkspace(scope, linked); scope.on('dispose', dispose); });
+  ctx.inject(['codshActions'], scope => { if (!ctx.get('codshActions')) return; const dispose = installLinkedThemeActions(scope, linked); scope.on('dispose', dispose); });
+  ctx.inject(['sessionController'], scope => { if (!ctx.get('sessionController')) return; const dispose = installNativeMessages(scope, linked); scope.on('dispose', dispose); });
+  ctx.on('session/event', (session, event) => linked.observeEvent(session.id, event), { global: true });
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => linked.observeStream(agent.session.id, frame), { global: true });
   const callableTools = agent => ctx.tools.schemas(agent).filter(tool => !tool.name.startsWith('peer_') && tool.name !== 'run_code' && ctx.tools.resolveExecution(tool.name, agent, false));
+  const linkedChatFor = agent => Object.values(linked.data?.chats ?? {}).find(chat => !chat.removed && [chat.sessionId, 'peer-linked-' + chat.id, 'peer-toolhost-' + chat.id].includes(agent?.session?.id ?? agent?.id));
+  linked.executeLinkedTool = async (chat, method, args, signal) => {
+    const agent = await linked.toolContext(chat), schemas = callableTools(agent);
+    if (method === 'messages.tools') return schemas;
+    if (typeof args.name !== 'string' || !schemas.some(tool => tool.name === args.name)) throw Error('本机没有可用的此联动工具');
+    return ctx.agents.withInitiator(agent, async () => {
+      const result = await ctx.tools.execute({ callId: 'peer-linked:' + randomUUID(), name: args.name, arguments: args.arguments, agent, signal });
+      const content = [];
+      for (const block of result.content) {
+        if (block.type === 'text') content.push(block);
+        else if (block.type === 'image') {
+          const image = await ctx.get('attachments').readImage(block.attachment, signal);
+          content.push({ type: 'image', mediaType: image.ref.mediaType, name: image.ref.name ?? 'remote-screen', data: Buffer.from(image.data).toString('base64') });
+        }
+      }
+      return { isError: result.isError, content };
+    });
+  };
   const liveAgents = () => ctx.agents.list().filter(agent => ctx.agents.get(agent.id) === agent);
   const availableTools = () => {
     const tools = new Map();
@@ -41,6 +87,7 @@ export function apply(ctx, config = {}) {
   };
   const schemas = () => [...availableTools().values()].filter(({ schema }) => shareAll || allowed.has(schema.name)).map(({ schema }) => schema);
   const dispatch = async (method, args, signal) => {
+    if (method.startsWith('messages.')) return linked.dispatch(method, args, signal);
     if (method === 'list') return schemas();
     if (method !== 'call' || !args || typeof args.name !== 'string') throw new Error('Invalid remote tool call');
     const run = async () => {
@@ -66,10 +113,11 @@ export function apply(ctx, config = {}) {
     return result;
   };
   const stop = async () => {
+    linked.disconnected();
     allowed.clear(); shareAll = false; hostingShortCode = undefined;
     const old = peer; peer = undefined; await old?.close();
   };
-  ctx.on('dispose', stop);
+  ctx.on('dispose', async () => { await stop(); await linked.dispose(); disposeAccess(); });
   const textOutput = { schema: { type: 'string' }, render: (_args, result) => [{ type: 'text', text: result }] };
   const register = (toolName, description, parameters, execute, output = textOutput) => ctx.tools.register(defineTool({ name: toolName, description, parameters, output, execute }));
   const string = description => ({ type: 'string', required: true, description });
@@ -95,7 +143,8 @@ export function apply(ctx, config = {}) {
     const hostAddresses = await androidHostAddresses(exec.signal);
     await stop();
     allowed = new Set(policy.names); shareAll = policy.all;
-    peer = new Peer({ pair, role, iceServers, hostAddresses, relayOnly: config.relayOnly === true, dispatch });
+    peer = new Peer({ pair, role, iceServers, hostAddresses, refreshHostAddresses: () => androidHostAddresses(), relayOnly: config.relayOnly === true, dispatch });
+    linked.start();
   };
   const status = () => ({
     ...(peer?.status() ?? { state: 'disconnected' }),
@@ -125,6 +174,26 @@ export function apply(ctx, config = {}) {
   };
   // Device pairing outlives sessions. Each incoming call resolves live tools and uses their local permission pipeline.
   ctx.inject(['webServer', 'connection'], scope => {
+    scope.effect(() => scope.webServer.register({ kind: 'exact', path: '/peer/messages', async handler(req, res) {
+      if (!scope.connection.authorizeIndex(req, res)) return;
+      res.setHeader('cache-control', 'no-store'); res.setHeader('content-type', 'application/json; charset=utf-8');
+      try {
+        if (req.method === 'GET') { res.end(JSON.stringify(await linked.overview())); return; }
+        if (req.method !== 'POST') { res.writeHead(405); res.end('{}'); return; }
+        if (!acceptSettingsWrite(req)) { res.writeHead(403); res.end(JSON.stringify({ error: '请求来源无效' })); return; }
+        let body = '';
+        for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 300000) throw new Error('请求内容过长'); }
+        res.end(JSON.stringify(await linked.action(JSON.parse(body))));
+      } catch (error) { res.writeHead(400); res.end(JSON.stringify({ error: error.message })); }
+    } }), 'Linked messages API');
+    scope.effect(() => scope.webServer.register({ kind: 'exact', path: '/peer/messages/events', handler(req, res) {
+      if (!scope.connection.authorizeIndex(req, res)) return;
+      if (req.method !== 'GET') { res.writeHead(405); res.end(); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+      res.write('data: changed\n\n'); linked.clients.add(res);
+      const timer = setInterval(() => res.write(': heartbeat\n\n'), 15000); timer.unref();
+      res.on('close', () => { clearInterval(timer); linked.clients.delete(res); });
+    } }), 'Linked messages updates');
     scope.effect(() => scope.webServer.register({ kind: 'exact', path: '/peer/settings', async handler(req, res) {
       if (!scope.connection.authorizeIndex(req, res)) return;
       res.setHeader('cache-control', 'no-store');
@@ -183,19 +252,23 @@ export function apply(ctx, config = {}) {
     await connect(pair, 'guest', exec, args.tools, args.ice_servers_json);
     return 'Connecting. Use peer_status before calling remote tools.';
   });
-  register('peer_status', 'Show P2P connection status and tools shared by this device.', {}, async () => JSON.stringify(status()));
+  register('peer_status', 'Check current paired-device connection. Linked conversations automatically provide tools on both devices; use peer_tools to discover the other device tools.', {}, async (_args, exec) => {
+    const chat = linkedChatFor(exec.agent);
+    return JSON.stringify({ ...status(), ...(chat ? { linkedConversation: { localDevice: linked.label, remoteDevice: linked.remoteLabel, connected: peer?.state === 'connected' && chat.members.includes(linked.remoteId), toolAccess: 'linked-session' } } : {}) });
+  });
   register('peer_disconnect', 'Disconnect and revoke remote access to all local tools.', {}, async () => { await stop(); return 'Disconnected; sharing revoked.'; });
   const requirePeer = exec => {
     if (!peer || peer.state !== 'connected') throw new Error('Peer is not connected');
     return peer;
   };
-  register('peer_tools', 'List tools explicitly shared by the connected Harness, including parameter schemas.', {}, async (_args, exec) => JSON.stringify(await requirePeer(exec).request('list', {}, exec.signal)));
+  register('peer_tools', 'Discover tools and parameter schemas on the other connected device. Linked conversations automatically provide its local tools; ordinary conversations list explicitly shared tools.', {}, async (_args, exec) => { const chat = linkedChatFor(exec.agent); return JSON.stringify(await requirePeer(exec).request(chat ? 'messages.tools' : 'list', chat ? { id: chat.id, deviceId: linked.data.deviceId } : {}, exec.signal)); });
   register('peer_call', 'Call one explicitly shared remote Harness tool. Read peer_tools first. Use remote screenshots and snapshot IDs for phone actions. Never automatically retry after timeout/disconnection: an action may already have happened.', {
     name: string('Remote tool name'), arguments_json: string('JSON object matching the remote tool parameter schema'),
   }, async (args, exec) => {
     const argumentsValue = JSON.parse(args.arguments_json);
     if (!argumentsValue || Array.isArray(argumentsValue) || typeof argumentsValue !== 'object') throw new Error('Tool arguments must be a JSON object');
-    const result = await requirePeer(exec).request('call', { name: args.name, arguments: argumentsValue }, exec.signal);
+    const chat = linkedChatFor(exec.agent);
+    const result = await requirePeer(exec).request(chat ? 'messages.tool' : 'call', { name: args.name, arguments: argumentsValue, ...(chat ? { id: chat.id, deviceId: linked.data.deviceId } : {}) }, exec.signal);
     if (!result || !Array.isArray(result.content) || typeof result.isError !== 'boolean') throw new Error('Invalid remote tool result');
     const content = [];
     for (const block of result.content) {

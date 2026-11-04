@@ -1,0 +1,64 @@
+services:
+  peer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MAX_CLIENTS: "96"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).read() == b'ok'"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+  frps:
+    build:
+      context: .
+      dockerfile: Dockerfile.frp
+      target: frps
+    restart: unless-stopped
+    environment:
+      FRP_AUTH_TOKEN: ${FRP_AUTH_TOKEN:?Run configure.py first}
+    volumes:
+      - ./frp/frps.toml.example:/etc/frp/frps.toml:ro
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+  frpc:
+    build:
+      context: .
+      dockerfile: Dockerfile.frp
+      target: frpc
+    restart: unless-stopped
+    depends_on:
+      peer:
+        condition: service_healthy
+      frps:
+        condition: service_started
+    environment:
+      FRP_AUTH_TOKEN: ${FRP_AUTH_TOKEN:?Run configure.py first}
+      DSH_DOMAIN: ${DSH_DOMAIN:?Run configure.py first}
+    volumes:
+      - ./frp/frpc.toml.example:/etc/frp/frpc.toml:ro
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+  gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [frps, frpc]
+    environment:
+      DSH_DOMAIN: ${DSH_DOMAIN:?Run configure.py first}
+      ACME_EMAIL: ${ACME_EMAIL:?Run configure.py first}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt: ["no-new-privileges:true"]
+volumes:
+  caddy_data:
+  caddy_config:

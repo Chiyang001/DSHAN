@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
@@ -82,17 +83,30 @@ export function createSignalServer({ port = 8787, host = '127.0.0.1', ttl = 10 *
           room = rooms.get(msg.room);
           if (!room) {
             if (rooms.size >= maxRooms) throw new Error('Room limit');
-            room = { id: msg.room, access: msg.access, peers: {}, expires: Date.now() + ttl };
+            room = { id: msg.room, access: msg.access, peers: {}, resumes: {}, nonces: {}, expires: Date.now() + ttl };
             rooms.set(msg.room, room);
           }
-          if (room.access !== msg.access || room.peers[msg.role] || room.used || Date.now() >= room.expires) throw new Error('Pair unavailable');
-          role = msg.role; room.peers[role] = ws; clearTimeout(joinTimer);
+          if (room.access !== msg.access || room.revoked || (room.used && room.resumes[msg.role] !== msg.resume) || (room.used && !msg.resume) || Date.now() >= room.expires) throw new Error('Pair unavailable');
+          if (msg.resume !== undefined && !/^[a-f0-9]{64}$/.test(msg.resume)) throw new Error('Invalid resume token');
+          if (msg.nonce !== undefined && !/^[a-f0-9]{32}$/.test(msg.nonce)) throw new Error('Invalid nonce');
+          if (room.peers[msg.role]) {
+            if (!room.used || !msg.resume || room.resumes[msg.role] !== msg.resume || !msg.nonce || room.nonces[msg.role] === msg.nonce) throw new Error('Pair unavailable');
+            const previous = Object.values(room.peers); room.peers = {}; room.expires = Date.now() + 24 * 60 * 60_000;
+            for (const member of previous) member.close(1012, 'Authenticated network handover');
+          }
+          role = msg.role; room.nonces[role] = msg.nonce; room.resumes[role] ??= msg.resume; room.peers[role] = ws; clearTimeout(joinTimer);
           ws.send(JSON.stringify({ type: 'waiting' }));
           if (room.peers.host && room.peers.guest) {
-            room.used = true;
-            for (const peer of Object.values(room.peers)) peer.send(JSON.stringify({ type: 'ready', relay: true }));
+            room.used = true; room.expires = Number.POSITIVE_INFINITY;
+            const epoch = randomBytes(16).toString('hex');
+            for (const peer of Object.values(room.peers)) peer.send(JSON.stringify({ type: 'ready', relay: true, epoch, ...(room.nonces.host && room.nonces.guest ? { nonces: room.nonces } : {}) }));
           }
         } else {
+          if (msg.type === 'leave') {
+            room.revoked = true;
+            for (const peer of Object.values(room.peers)) peer.close(4001, 'Sharing revoked');
+            return;
+          }
           const other = room.peers[role === 'host' ? 'guest' : 'host'];
           if (!other || other.readyState !== WebSocket.OPEN) throw new Error('Peer unavailable');
           if (msg.type === 'relay-data') {
@@ -113,14 +127,17 @@ export function createSignalServer({ port = 8787, host = '127.0.0.1', ttl = 10 *
     ws.on('close', () => {
       clearTimeout(joinTimer);
       if (room && room.peers[role] === ws) {
-        for (const other of Object.values(room.peers)) if (other !== ws) other.close(1000, 'Peer left');
-        rooms.delete(room.id);
+        const others = Object.values(room.peers).filter(other => other !== ws);
+        room.peers = {};
+        if (!room.revoked && room.used && room.resumes.host && room.resumes.guest) room.expires = Date.now() + 24 * 60 * 60_000;
+        else if (rooms.get(room.id) === room) rooms.delete(room.id);
+        for (const other of others) other.close(room.revoked ? 4001 : 1012, room.revoked ? 'Sharing revoked' : 'Peer left');
       }
     });
   });
   const timer = setInterval(() => {
     const now = Date.now();
-    for (const room of rooms.values()) if (!room.used && now >= room.expires) {
+    for (const room of rooms.values()) if (now >= room.expires) {
       for (const peer of Object.values(room.peers)) peer.close(1000, 'Pair expired');
       rooms.delete(room.id);
     }

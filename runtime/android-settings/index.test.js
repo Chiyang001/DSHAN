@@ -1,6 +1,31 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { apply } from './index.js'
+import { KernelUpdater } from './kernel-updater.js'
+
+test('kernel update endpoint forwards the selected channel only for version checks', async (t) => {
+  const calls = []
+  t.mock.method(KernelUpdater.prototype, 'check', async (channel) => {
+    calls.push(channel)
+    return { phase: 'checked', channel: channel ?? 'latest' }
+  })
+  let route
+  apply({
+    effect: (fn) => fn(),
+    webServer: { register: (value) => { if (value.path === '/android/kernel-update') route = value; return () => {} } },
+    connection: { authorizeIndex: () => true },
+  })
+  for (const channel of ['alpha', 'latest', undefined]) {
+    const response = { status: 200, setHeader() {}, writeHead(status) { this.status = status }, end(body) { this.body = JSON.parse(body) } }
+    await route.handler({
+      method: 'POST', headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' },
+      async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ action: 'check', channel })) },
+    }, response)
+    assert.equal(response.status, 200)
+    assert.equal(response.body.channel, channel ?? 'latest')
+  }
+  assert.deepEqual(calls, ['alpha', 'latest', undefined])
+})
 
 test('Android settings requires authentication, same-origin writes and valid switches', async () => {
   let route

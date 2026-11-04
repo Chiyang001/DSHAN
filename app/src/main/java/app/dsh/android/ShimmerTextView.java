@@ -10,6 +10,9 @@ import android.view.animation.LinearInterpolator;
 import android.widget.TextView;
 
 /** Blue left-to-right text highlight while a background task is active. */
+// Uses the platform Material theme, including in a Service overlay. AppCompat
+// theme/tint support is intentionally not required for this API 30+ view.
+@android.annotation.SuppressLint("AppCompatCustomView")
 final class ShimmerTextView extends TextView {
     private static final int BASE = Color.rgb(230, 235, 246);
     private static final int BLUE = Color.rgb(105, 180, 255);

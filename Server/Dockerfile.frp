@@ -1,0 +1,24 @@
+FROM alpine:3.22 AS download
+ARG TARGETARCH
+ARG FRP_VERSION=0.71.0
+RUN apk add --no-cache curl ca-certificates && \
+    case "$TARGETARCH" in \
+      amd64) sha=84f27e39f11169f7adcef8e8b70c9329de17747b1f14dad9fb95eef5682ea716 ;; \
+      arm64) sha=f33c293c275d8fc68c654b6fba8f10b2551d6463d09a9fc9cffb7227eae82266 ;; \
+      *) echo "Unsupported architecture" >&2; exit 1 ;; \
+    esac && \
+    curl -fL --retry 3 --connect-timeout 20 --max-time 300 \
+      "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${TARGETARCH}.tar.gz" -o /frp.tgz && \
+    echo "$sha  /frp.tgz" | sha256sum -c - && \
+    mkdir /frp && tar -xzf /frp.tgz --strip-components=1 -C /frp
+
+FROM alpine:3.22 AS base
+RUN addgroup -g 10001 dsh && adduser -D -u 10001 -G dsh dsh
+COPY --from=download /frp/frpc /frp/frps /usr/local/bin/
+USER dsh
+
+FROM base AS frps
+ENTRYPOINT ["frps", "-c", "/etc/frp/frps.toml"]
+
+FROM base AS frpc
+ENTRYPOINT ["frpc", "-c", "/etc/frp/frpc.toml"]

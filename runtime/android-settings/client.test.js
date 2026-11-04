@@ -103,3 +103,83 @@ test('the Android settings section still renders its controls', () => {
   assert.match(source, /@deepseek-ai\/dsh-client-ui-primitives/)
   assert.doesNotMatch(source, /type: 'checkbox'/)
 })
+
+test('update dialog switches channels, displays the checked version and locks selection during installation', async () => {
+  const values = []
+  let cursor = 0
+  let readStatus
+  const hooks = {
+    ...react,
+    useCallback(fn) { readStatus = fn; return fn },
+    useState(initial) {
+      const index = cursor++
+      if (!(index in values)) values[index] = initial
+      return [values[index], (value) => { values[index] = value }]
+    },
+    useRef(initial) {
+      const index = cursor++
+      return values[index] ??= { current: initial }
+    },
+  }
+  let component
+  factory((name) => name === 'react' ? hooks : resolve(name)).apply({ slots: {
+    inject: (_name, callback) => callback(),
+    register: (options, value) => { if (options.id === 'android-kernel-update') component = value },
+  } })
+  const render = () => { cursor = 0; return component() }
+  const nodes = (tree) => {
+    if (Array.isArray(tree)) return tree.flatMap(nodes)
+    if (!tree || typeof tree !== 'object') return []
+    return [tree, ...nodes(tree.children)]
+  }
+  const button = (tree, label) => nodes(tree).find((node) => node.type === primitives.Button && node.children === label)
+  const originalFetch = globalThis.fetch
+  const originalDocument = globalThis.document
+  const calls = []
+  let pendingGet
+  let status = { phase: 'idle', channel: 'latest', currentVersion: '0.2.1', busy: false }
+  globalThis.document = { body: {} }
+  globalThis.fetch = async (_url, options) => {
+    if (!options && pendingGet) return pendingGet
+    if (options) {
+      const body = JSON.parse(options.body)
+      calls.push(body)
+      if (body.action === 'check') {
+        status = { ...status, channel: body.channel ?? status.channel, phase: 'checked', available: true, compatible: true }
+        status.latestVersion = status.channel === 'alpha' ? '0.2.2-alpha.3' : '0.2.1-rc.5'
+      } else if (body.action === 'start') status = { ...status, phase: 'resolve', busy: true }
+    }
+    return { ok: true, json: async () => status }
+  }
+  try {
+    await button(render(), '检查更新').props.onClick()
+    assert.equal(button(render(), '正式版').props['aria-pressed'], true)
+    const oldStatus = status
+    let resolveOldRead
+    pendingGet = new Promise((resolve) => { resolveOldRead = resolve })
+    const oldRead = readStatus()
+    pendingGet = null
+    await button(render(), 'Alpha 版').props.onClick()
+    resolveOldRead({ ok: true, json: async () => oldStatus })
+    await oldRead
+    let tree = render()
+    assert.deepEqual(calls.at(-1), { action: 'check', channel: 'alpha' })
+    assert.equal(button(tree, 'Alpha 版').props['aria-pressed'], true)
+    assert.ok(nodes(tree).some((node) => node.children === '最新版本 (alpha)：0.2.2-alpha.3'))
+    await button(tree, '重新检查').props.onClick()
+    assert.deepEqual(calls.at(-1), { action: 'check', channel: 'alpha' })
+    button(render(), '关闭').props.onClick()
+    await button(render(), '检查更新').props.onClick()
+    assert.equal(button(render(), 'Alpha 版').props['aria-pressed'], true)
+    await button(render(), '正式版').props.onClick()
+    assert.deepEqual(calls.at(-1), { action: 'check', channel: 'latest' })
+    await button(render(), '下载并安装更新').props.onClick()
+    tree = render()
+    assert.equal(button(tree, 'Alpha 版').props.disabled, true)
+    assert.equal(button(tree, '正式版').props.disabled, true)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalDocument === undefined) delete globalThis.document
+    else globalThis.document = originalDocument
+  }
+})

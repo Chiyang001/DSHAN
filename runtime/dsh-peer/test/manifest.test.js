@@ -20,7 +20,7 @@ test('Android config supplies the pairing server to the peer component', () => {
   assert.equal(readFileSync(source, 'utf8'), readFileSync(asset, 'utf8'));
   const patches = loadOverlayPatches('dsh', fileURLToPath(source));
   const peer = patches.flatMap(patch => patch.insert || []).find(row => row.id === 'dsh-peer');
-  assert.equal(peer.config.signalingServer, 'ws://dshanp2p.chiyang001.top/peer');
+  assert.equal(peer.config.signalingServer, 'wss://dshanp2p.chiyang001.top/peer');
   assert.equal(peer.config.signalingAddress, undefined, 'Android should use its system DNS instead of a pinned address');
   assert.equal(peer.config.connectionMode, 'auto');
 });

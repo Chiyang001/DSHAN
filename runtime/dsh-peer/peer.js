@@ -6,9 +6,9 @@ import { guardDuplicateHelloVerify } from './dtls-compat.js';
 import { RelayWire } from './relay.js';
 import { isIP } from 'node:net';
 
-export class Peer {
-  constructor({ pair, role, iceServers = [], hostAddresses, relayOnly = false, dispatch, timeout = 120_000, fallbackDelay = 8000 }) {
-    this.pair = pair; this.role = role; this.dispatch = dispatch; this.timeout = timeout;
+class PeerTransport {
+  constructor({ pair, role, iceServers = [], hostAddresses, relayOnly = false, dispatch, timeout = 120_000, fallbackDelay = 8000, resumeToken, onClose = () => {}, heartbeatInterval = 15000 }) {
+    this.onClose = onClose; this.signalNonce = randomBytes(16).toString('hex'); this.pair = pair; this.role = role; this.dispatch = dispatch; this.timeout = timeout;
     this.state = 'connecting'; this.pending = new Map(); this.running = new Map(); this.seen = new Set();
     this.sequence = 0; this.inSequence = 0; this.signalQueue = Promise.resolve();
     this.diagnostics = {};
@@ -50,9 +50,21 @@ export class Peer {
       };
     }
     this.ws = new WebSocket(pair.server, websocketOptions);
-    this.ws.on('open', () => this.ws.send(JSON.stringify({ type: 'join', room: pair.room, role, access: mac(pair.secret, 'join:' + pair.room) })));
+    this.ws.on('open', () => this.ws.send(JSON.stringify({ type: 'join', room: pair.room, role, access: mac(pair.secret, 'join:' + pair.room), resume: resumeToken, nonce: this.signalNonce })));
     this.ws.on('error', error => { this.diagnostics.signalingError = error.message; void this.close('Signaling connection failed: ' + error.message); });
-    this.ws.on('close', (code, reason) => { if ((this.usingRelay || this.state !== 'connected') && this.state !== 'closed') void this.close(`Signaling disconnected (${code}: ${reason.toString()})`); });
+    this.ws.on('close', (code, reason) => { if (code === 4001) this.revoked = true; if (this.state !== 'closed') void this.close(`Signaling disconnected (${code}: ${reason.toString()})`); });
+    this.ws.on('pong', () => { this.awaitingPong = false; });
+    this.heartbeat = setInterval(() => {
+      if (this.ws.readyState !== WebSocket.OPEN) return;
+      if (this.awaitingPong) { void this.close('Signaling heartbeat timed out'); return; }
+      this.awaitingPong = true; this.ws.ping();
+      if (this.state === 'connected') {
+        if (this.waitingPeerHeartbeat) { void this.close('Peer heartbeat timed out'); return; }
+        this.waitingPeerHeartbeat = true;
+        this.wire.send({ type: 'heartbeat', id: 'heartbeat' }).catch(error => this.close(error.message));
+      }
+    }, heartbeatInterval);
+    this.heartbeat.unref();
     this.ws.on('message', data => {
       // Relay RPC must not queue behind an in-progress tool or ICE operation.
       let message;
@@ -69,6 +81,11 @@ export class Peer {
         if (this.state === 'closed') return;
         if (message.type === 'ready') {
           this.relaySupported = message.relay === true;
+          if (message.epoch !== undefined && !/^[a-f0-9]{32}$/.test(message.epoch)) throw new Error('Invalid signaling epoch');
+          if (message.nonces) {
+            if (message.nonces[role] !== this.signalNonce || !/^[a-f0-9]{32}$/.test(message.nonces.host) || !/^[a-f0-9]{32}$/.test(message.nonces.guest)) throw new Error('Invalid signaling nonces');
+            this.signalPair = { ...pair, room: pair.room + ':' + message.nonces.host + ':' + message.nonces.guest };
+          } else throw new Error('Signaling server does not support reconnect nonces; update the server');
           if (this.mode === 'relay' && !this.relaySupported) throw new Error('Signaling server does not support encrypted relay; update the server');
           if (role !== 'host') return;
           if (this.mode === 'relay') { this.beginRelay(); return; }
@@ -79,7 +96,7 @@ export class Peer {
             this.signal({ type: 'offer', sdp: this.pc.localDescription.sdp });
           } catch (error) { this.transportUnavailable(error); }
         } else if (message.type === 'signal') {
-          const body = verify(pair, role === 'host' ? 'guest' : 'host', this.inSequence++, message);
+          const body = verify(this.signalPair ?? pair, role === 'host' ? 'guest' : 'host', this.inSequence++, message);
           if (body.type === 'relay') {
             if (role !== 'guest' || this.mode === 'p2p' || relayOnly || !this.relaySupported || !/^[a-f0-9]{32}$/.test(body.session)) throw new Error('Invalid relay negotiation');
             this.relaySession = body.session;
@@ -131,7 +148,7 @@ export class Peer {
   }
   signal(body) {
     if (this.ws.readyState !== WebSocket.OPEN) throw new Error('Signaling disconnected');
-    this.ws.send(JSON.stringify({ type: 'signal', ...sign(this.pair, this.role, this.sequence++, body) }));
+    this.ws.send(JSON.stringify({ type: 'signal', ...sign(this.signalPair ?? this.pair, this.role, this.sequence++, body) }));
   }
   watchDtls() {
     for (const transport of this.pc.dtlsTransports) {
@@ -164,7 +181,7 @@ export class Peer {
   async request(method, args, signal) {
     signal?.throwIfAborted();
     if (this.state !== 'connected') throw new Error('Peer is not connected');
-    if (this.pending.size >= 16) throw new Error('Too many peer requests');
+    if (this.pending.size >= 16 && method !== '$peer.disconnect') throw new Error('Too many peer requests');
     const id = randomUUID();
     return new Promise((resolve, reject) => {
       const cancel = () => {
@@ -183,7 +200,15 @@ export class Peer {
     });
   }
   async receive(message) {
+    if (this.state !== 'connected') return;
+    if (message?.type === 'heartbeat') { await this.wire.send({ type: 'heartbeat-ack', id: 'heartbeat' }); return; }
+    if (message?.type === 'heartbeat-ack') { this.waitingPeerHeartbeat = false; return; }
     if (!message || typeof message.id !== 'string' || message.id.length > 80) throw new Error('Invalid RPC');
+    if (message.type === 'request' && message.method === '$peer.disconnect') {
+      this.revoked = true;
+      await this.wire.send({ type: 'response', id: message.id, result: true });
+      return;
+    }
     if (message.type === 'response') {
       const entry = this.pending.get(message.id);
       if (!entry) return;
@@ -201,17 +226,85 @@ export class Peer {
       try { response = { type: 'response', id: message.id, result: await this.dispatch(message.method, message.args, controller.signal) }; }
       catch (error) { response = { type: 'response', id: message.id, error: error.message || 'Remote tool failed' }; }
       finally { clearTimeout(timer); this.running.delete(message.id); }
-      await this.wire.send(response);
+      if (this.state === 'connected' && !controller.signal.aborted) await this.wire.send(response);
     } else throw new Error('Unknown RPC message');
   }
   close(reason = 'Peer disconnected') {
-    if (this.closing) return this.closing;
-    this.state = 'closed'; this.error = reason; clearTimeout(this.connectTimer); clearTimeout(this.fallbackTimer); this.rejectReady(new Error(reason));
+    if (this.state === 'closed') return this.closing ?? Promise.resolve();
+    this.state = 'closed'; this.error = reason; clearInterval(this.heartbeat); clearTimeout(this.connectTimer); clearTimeout(this.fallbackTimer); this.rejectReady(new Error(reason));
     for (const entry of this.pending.values()) { entry.cleanup(); entry.reject(new Error(reason + '; remote action outcome may be unknown. Inspect before retrying.')); }
     this.pending.clear(); for (const controller of this.running.values()) controller.abort();
     this.wire?.close(); this.ws?.terminate();
     this.closing = this.pc.close().catch(() => {});
+    this.onClose(reason, this.revoked);
     return this.closing;
   }
   status() { return { state: this.state, transport: this.usingRelay ? 'FRP/WebSocket relay (AES-256-GCM)' : 'WebRTC ICE/DTLS/SCTP', relayOnly: this.relayOnly, diagnostics: this.diagnostics, error: this.error ?? null }; }
+}
+
+// Keep pairing authorization while replacing every socket, ICE transport and
+// encryption session. RPCs belong to one transport and are never replayed.
+export class Peer {
+  constructor(options) {
+    this.options = options; this.initialDeadline = Date.now() + (options.timeout ?? 120000);
+    this.resumeToken = randomBytes(32).toString('hex');
+    this.attempts = 0; this.stopped = false; this.reconnecting = false;
+    this.ready = new Promise((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
+    this.ready.catch(() => {});
+    this.start();
+  }
+  start() {
+    if (this.stopped) return;
+    const transport = new PeerTransport({ ...this.options, timeout: this.everConnected ? this.options.timeout : Math.max(1, this.initialDeadline - Date.now()), resumeToken: this.resumeToken,
+      onClose: (reason, revoked) => this.lost(transport, reason, revoked) });
+    this.current = transport;
+    transport.ready.then(() => {
+      if (this.current !== transport || this.stopped) return;
+      this.everConnected = true; this.reconnecting = false; this.attempts = 0;
+      this.lastError = null; this.resolveReady();
+    }).catch(() => {});
+  }
+  lost(transport, reason, revoked) {
+    if (this.stopped || this.current !== transport) return;
+    this.lastError = reason;
+    if (revoked || (!this.everConnected && Date.now() >= this.initialDeadline)) {
+      this.stopped = true; this.rejectReady(new Error(reason)); return;
+    }
+    this.reconnecting = true;
+    const base = this.options.reconnectDelay ?? 1000;
+    const delay = Math.min(30000, base * 2 ** Math.min(this.attempts++, 5) * (0.8 + Math.random() * 0.4));
+    this.nextRetryAt = Date.now() + delay;
+    this.retryTimer = setTimeout(async () => {
+      try {
+        if (this.options.refreshHostAddresses) this.options.hostAddresses = await this.options.refreshHostAddresses();
+        if (!this.stopped) this.start();
+      } catch (error) { this.lost(transport, error.message, false); }
+    }, delay);
+  }
+  get state() { return this.stopped ? 'closed' : this.reconnecting ? 'reconnecting' : this.current.state; }
+  get pc() { return this.current.pc; }
+  get ws() { return this.current.ws; }
+  request(...args) {
+    if (this.state !== 'connected') return Promise.reject(new Error('Peer is not connected'));
+    return this.current.request(...args);
+  }
+  async close(reason = 'Peer disconnected') {
+    this.stopped = true; clearTimeout(this.retryTimer); this.rejectReady(new Error(reason));
+    if (this.current.state === 'connected') {
+      await this.current.request('$peer.disconnect', {}, AbortSignal.timeout(1000)).catch(() => {});
+    }
+    if (this.ws.readyState === WebSocket.OPEN) {
+      // Send revocation before closing so both endpoints stop reconnecting.
+      const socket = this.ws;
+      await new Promise(resolve => {
+        const timer = setTimeout(() => { socket.terminate(); resolve(); }, 1000);
+        socket.once('close', () => { clearTimeout(timer); resolve(); });
+        socket.send(JSON.stringify({ type: 'leave' }), () => socket.close(4001, 'Sharing revoked'));
+      });
+    }
+    return this.current.close(reason);
+  }
+  status() { return { ...this.current.status(), state: this.state,
+    reconnectAttempts: this.attempts, nextRetryAt: this.reconnecting ? this.nextRetryAt : null,
+    error: this.lastError ?? this.current.error ?? null }; }
 }

@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.log
+frp/*
+!frp/README.md
+!frp/frps.toml.example
+!frp/frpc.toml.example
+!frp/frpc.ini.example

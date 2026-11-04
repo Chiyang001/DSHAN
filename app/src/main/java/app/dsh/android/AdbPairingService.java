@@ -26,15 +26,33 @@ public final class AdbPairingService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
-        getSystemService(NotificationManager.class).createNotificationChannel(
-            new NotificationChannel(CHANNEL, "无线 ADB 配对", NotificationManager.IMPORTANCE_DEFAULT));
+        try {
+            getSystemService(NotificationManager.class).createNotificationChannel(
+                new NotificationChannel(CHANNEL, "无线 ADB 配对", NotificationManager.IMPORTANCE_DEFAULT));
+        } catch (RuntimeException error) {
+            failForegroundStart(error);
+        }
+    }
+
+    private void failForegroundStart(RuntimeException error) {
+        android.util.Log.w("DSHAndroid", "Cannot promote ADB pairing service", error);
+        AdbClient.pairingStatus = "配对服务启动失败，请检查通知和后台运行权限后重试";
+        android.widget.Toast.makeText(this, AdbClient.pairingStatus, android.widget.Toast.LENGTH_LONG).show();
+        destroyed = true;
+        stopSelf();
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int id) {
+        if (destroyed) return START_NOT_STICKY;
         // Every foreground start must be promoted immediately, before key generation.
         if (!started) {
-            started = true;
-            startForeground(NOTIFICATION, notification("准备配对通知…", false));
+            try {
+                startForeground(NOTIFICATION, notification("准备配对通知…", false));
+                started = true;
+            } catch (RuntimeException error) {
+                failForegroundStart(error);
+                return START_NOT_STICKY;
+            }
             main.postDelayed(timeout, 300000);
             worker.execute(() -> {
                 try {

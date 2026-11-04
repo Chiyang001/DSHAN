@@ -8,11 +8,6 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 final class NodeRuntime {
-    static {
-        System.loadLibrary("node");
-        System.loadLibrary("dshbridge");
-    }
-
     private static boolean started;
     private static volatile boolean awaitingKernelHealth;
     private static native int start(String home, String cache, String dshHome,
@@ -23,6 +18,10 @@ final class NodeRuntime {
         started = true;
         new Thread(() -> {
             try {
+                // Keep linker errors inside the startup error reporting path;
+                // a failed static initializer permanently poisons this class.
+                System.loadLibrary("node");
+                System.loadLibrary("dshbridge");
                 File home = context.getNoBackupFilesDir();
                 File bundledRuntime = new File(home, "runtime");
                 File runtime = bundledRuntime;
@@ -52,7 +51,7 @@ final class NodeRuntime {
                 // Older downloaded kernels skipped sharp's WASM fallback as an
                 // optional dependency. Supply it without replacing their core.
                 if (!runtime.equals(bundledRuntime)) {
-                    for (String pkg : new String[] {"@img/sharp-wasm32", "@emnapi/runtime", "tslib"}) {
+                    for (String pkg : new String[] {"@img/sharp-wasm32", "@emnapi/runtime", "tslib", "pnpm"}) {
                         File destination = new File(runtime, "node_modules/" + pkg);
                         if (!new File(destination, "package.json").exists())
                             copyTree(new File(bundledRuntime, "node_modules/" + pkg), destination);
@@ -87,6 +86,7 @@ final class NodeRuntime {
                 overlayAsset(context, "android-fs-search.js", new File(runtime, "android-fs-search.js"));
                 overlayAsset(context, "android-search.js", new File(runtime, "android-search.js"));
                 overlayAsset(context, "android-plugin-policy.cjs", new File(runtime, "android-plugin-policy.cjs"));
+                overlayAsset(context, "android-package-manager.cjs", new File(runtime, "android-package-manager.cjs"));
                 overlayAsset(context, "android-directory-picker.js",
                     new File(runtime, "android-directory-picker.js"));
                 overlayAsset(context, "android-directory-picker-backend.js",

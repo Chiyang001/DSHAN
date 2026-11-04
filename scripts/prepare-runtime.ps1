@@ -6,12 +6,19 @@ $output = Join-Path $outputDir 'runtime.zip'
 if (-not (Test-Path (Join-Path $runtimeDir 'node_modules/@deepseek-ai/dsh/lib/bin.js'))) {
     throw '请先执行 npm ci --prefix runtime --omit=dev --ignore-scripts --os=android --cpu=arm64 --libc=bionic'
 }
+$runtimeManifest = Get-Content -LiteralPath (Join-Path $runtimeDir 'package.json') -Raw | ConvertFrom-Json
+foreach ($packageName in @('@deepseek-ai/dsh', '@deepseek-ai/dsh-tools')) {
+    $installedManifest = Get-Content -LiteralPath (Join-Path $runtimeDir "node_modules/$packageName/package.json") -Raw | ConvertFrom-Json
+    if ($installedManifest.version -ne $runtimeManifest.dependencies.$packageName) {
+        throw "内置依赖 $packageName 的安装版本与 package.json 不一致，请先执行 npm ci --prefix runtime --omit=dev --ignore-scripts --os=android --cpu=arm64 --libc=bionic"
+    }
+}
 Copy-Item -LiteralPath (Join-Path $runtimeDir 'dsh-peer/settings-client.js') -Destination (Join-Path $runtimeDir 'dsh-peer/client.js') -Force
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 foreach ($name in @('android-host.js', 'android-tools.js', 'android-loop-guard.js', 'android-fast-screen.js',
     'android-coordinate-scale.js', 'android-ui-parse.js', 'android-screen-targets.js', 'android-screen-annotate.js', 'mobile-bootstrap.cjs',
     'android-flock.cjs', 'android-network.cjs', 'android-native-command.cjs', 'android-native-command-shim.mjs', 'android-fs-search.js', 'android-directory-picker.js',
-    'android-directory-picker-backend.js', 'android-search.js', 'android-plugin-policy.cjs', 'android.patch.template.yml')) {
+    'android-directory-picker-backend.js', 'android-search.js', 'android-plugin-policy.cjs', 'android-package-manager.cjs', 'android.patch.template.yml')) {
     Copy-Item -LiteralPath (Join-Path $runtimeDir $name) -Destination (Join-Path $outputDir $name) -Force
 }
 foreach ($name in @('package.json', 'index.js', 'client.js', 'kernel-updater.js', 'kernel-worker.js')) {
@@ -43,6 +50,7 @@ try {
         'android-fs-search.js'
         'android-search.js'
         'android-plugin-policy.cjs'
+        'android-package-manager.cjs'
     ) | ForEach-Object { Get-Item (Join-Path $runtimeDir $_) }
     $files += Get-ChildItem (Join-Path $runtimeDir 'node_modules') -Recurse -File
     $files += Get-ChildItem (Join-Path $runtimeDir 'dsh-peer') -File

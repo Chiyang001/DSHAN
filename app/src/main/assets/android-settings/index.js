@@ -18,9 +18,9 @@ export function apply(ctx) {
           if (req.headers.origin !== `http://${req.headers.host}`) { res.writeHead(403); res.end(JSON.stringify({ error: '请求来源无效' })); return }
           let body = ''
           for await (const chunk of req) { body += chunk.toString(); if (body.length > 2048) throw new Error('请求内容过长') }
-          const { action } = JSON.parse(body)
+          const { action, channel } = JSON.parse(body)
           if (!['check', 'start', 'cancel', 'restart'].includes(action)) throw new Error('未知更新操作')
-          result = await updater[action]()
+          result = action === 'check' ? await updater.check(channel) : await updater[action]()
         } else { res.writeHead(405); res.end(JSON.stringify({ error: '请求方法无效' })); return }
         res.end(JSON.stringify(result))
       } catch (error) { res.writeHead(400); res.end(JSON.stringify({ error: error.message ?? '更新操作失败' })) }

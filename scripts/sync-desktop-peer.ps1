@@ -8,7 +8,7 @@ if (-not (Test-Path $source)) { throw "Missing plugin source: $source" }
 Copy-Item -LiteralPath (Join-Path $source 'settings-client.js') -Destination (Join-Path $source 'client.js') -Force
 
 $files = @(
-    'index.js', 'peer.js', 'protocol.js', 'network.js', 'relay.js', 'dtls-compat.js',
+    'index.js', 'peer.js', 'messages.js', 'native-messages.js', 'lifecycle.js', 'linked-access.js', 'protocol.js', 'network.js', 'relay.js', 'dtls-compat.js',
     'signal-server.js', 'package.json', 'package-lock.json', 'README.md',
     'LIVE-VALIDATION.md', 'cordis.patch.yml', '.gitignore', 'client.js', 'settings-client.js'
 )
